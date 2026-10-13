@@ -138,6 +138,29 @@ app.put('/api/departments/:id/toggle', auth(['admin']), h(async (req, res) => {
   res.json({ ok: true });
 }));
 
+app.put('/api/departments/:id', auth(['admin']), h(async (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) throw new HttpError(400, 'Department name is required.');
+  try {
+    await pool.query('UPDATE departments SET name=? WHERE id=?', [name, req.params.id]);
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') throw new HttpError(400, 'That department already exists.');
+    throw e;
+  }
+  res.json({ ok: true });
+}));
+
+app.delete('/api/departments/:id', auth(['admin']), h(async (req, res) => {
+  try {
+    await pool.query('DELETE FROM departments WHERE id=?', [req.params.id]);
+  } catch (e) {
+    if (e.code === 'ER_ROW_IS_REFERENCED_2')
+      throw new HttpError(400, 'This department is in use and cannot be deleted. Deactivate it instead.');
+    throw e;
+  }
+  res.json({ ok: true });
+}));
+
 // ---------- documents ----------
 app.get('/api/documents', auth(), h(async (req, res) => {
   const { q = '', status = '' } = req.query;

@@ -162,14 +162,24 @@ $('#overdue-rows').addEventListener('click', (e) => {
 });
 
 // ---------- departments ----------
+
+
+
 async function loadDepartments() {
   lookups = await api('/lookups');
   const isAdmin = user.role === 'admin';
-  $('#dept-rows').innerHTML = lookups.departments.map((d) => `<tr>
-    <td>${esc(d.name)}</td><td>${d.is_active ? 'Active' : 'Inactive'}</td>
-    <td>${isAdmin ? `<button class="ghost" data-toggle="${d.id}">${d.is_active ? 'Deactivate' : 'Activate'}</button>` : ''}</td></tr>`).join('');
+  const q = $('#dept-search').value.toLowerCase();
+  const list = lookups.departments.filter((d) => d.name.toLowerCase().includes(q));
+  $('#dept-rows').innerHTML = list.length
+    ? list.map((d) => `<tr>
+        <td>${esc(d.name)}</td><td>${d.is_active ? 'Active' : 'Inactive'}</td>
+        <td>${isAdmin ? `<button class="ghost" data-edit="${d.id}">Edit</button>
+          <button class="ghost" data-toggle="${d.id}">${d.is_active ? 'Deactivate' : 'Activate'}</button>
+          <button class="ghost" data-delete="${d.id}">Delete</button>` : ''}</td></tr>`).join('')
+    : '<tr><td class="empty" colspan="3">No departments found.</td></tr>';
   fillSelect('#r-dept', lookups.departments.filter((d) => d.is_active));
 }
+$('#dept-search').addEventListener('input', loadDepartments);
 $('#dept-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   try {
@@ -179,9 +189,21 @@ $('#dept-form').addEventListener('submit', async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 $('#dept-rows').addEventListener('click', async (e) => {
-  if (!e.target.dataset.toggle) return;
-  await api(`/departments/${e.target.dataset.toggle}/toggle`, 'PUT');
-  loadDepartments();
+  const { toggle, edit, delete: del } = e.target.dataset;
+  try {
+    if (toggle) await api(`/departments/${toggle}/toggle`, 'PUT');
+    if (edit) {
+      const cur = lookups.departments.find((d) => d.id == edit);
+      const name = prompt('New department name:', cur.name);
+      if (!name) return;
+      await api(`/departments/${edit}`, 'PUT', { name });
+    }
+    if (del) {
+      if (!confirm('Delete this department?')) return;
+      await api(`/departments/${del}`, 'DELETE');
+    }
+    loadDepartments();
+  } catch (err) { toast(err.message, true); }
 });
 
 // ---------- document profile (modal) ----------
