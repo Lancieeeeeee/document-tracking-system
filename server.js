@@ -161,6 +161,239 @@ app.delete('/api/departments/:id', auth(['admin']), h(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- employees, senders, receivers ----------
+const manage = ['admin', 'clerk'];
+
+app.get('/api/employees', auth(manage), h(async (req, res) => {
+  const [rows] = await pool.query(
+    `SELECT e.*, d.name dept_name, s.id sender_id, r.id receiver_id
+     FROM employees e
+     JOIN departments d ON d.id = e.department_id
+     LEFT JOIN senders s ON s.employee_id = e.id
+     LEFT JOIN receivers r ON r.employee_id = e.id
+     ORDER BY e.full_name`);
+  res.json(rows);
+}));
+
+app.get('/api/employees/:id', auth(manage), h(async (req, res) => {
+  const [[employee]] = await pool.query(
+    `SELECT e.*, d.name dept_name FROM employees e
+     JOIN departments d ON d.id = e.department_id WHERE e.id=?`, [req.params.id]);
+  if (!employee) throw new HttpError(404, 'Employee not found.');
+  const [[sender]] = await pool.query('SELECT * FROM senders WHERE employee_id=?', [employee.id]);
+  const [[receiver]] = await pool.query(
+    `SELECT r.*, d.name dept_name FROM receivers r
+     JOIN departments d ON d.id = r.department_id WHERE r.employee_id=?`, [employee.id]);
+  res.json({ employee, sender: sender || null, receiver: receiver || null });
+}));
+
+async function saveEmployee(req, res, id) {
+  const { employee_no, full_name, position, email, department_id } = req.body;
+  if (!(employee_no || '').trim() || !(full_name || '').trim() || !department_id)
+    throw new HttpError(400, 'Employee no., full name and department are required.');
+  if (email && !/^\S+@\S+\.\S+$/.test(email)) throw new HttpError(400, 'Enter a valid email address.');
+  const vals = [employee_no.trim(), full_name.trim(), position || null, email || null, department_id];
+  try {
+    if (id) {
+      await pool.query(
+        'UPDATE employees SET employee_no=?, full_name=?, position=?, email=?, department_id=? WHERE id=?',
+        [...vals, id]);
+    } else {
+      await pool.query(
+        'INSERT INTO employees (employee_no, full_name, position, email, department_id) VALUES (?,?,?,?,?)', vals);
+    }
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') throw new HttpError(400, 'That employee number already exists.');
+    throw e;
+  }
+  res.json({ ok: true });
+}
+app.post('/api/employees', auth(manage), h((req, res) => saveEmployee(req, res)));
+app.put('/api/employees/:id', auth(manage), h((req, res) => saveEmployee(req, res, req.params.id)));
+
+app.put('/api/employees/:id/toggle', auth(manage), h(async (req, res) => {
+  await pool.query('UPDATE employees SET is_active = 1 - is_active WHERE id=?', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+app.delete('/api/employees/:id', auth(manage), h(async (req, res) => {
+  try {
+    await pool.query('DELETE FROM employees WHERE id=?', [req.params.id]);
+  } catch (e) {
+    if (e.code === 'ER_ROW_IS_REFERENCED_2')
+      throw new HttpError(400, 'This employee is registered as a sender or receiver. Remove that first.');
+    throw e;
+  }
+  res.json({ ok: true });
+}));
+
+async function activeEmployee(employee_id) {
+  const [[e]] = await pool.query('SELECT * FROM employees WHERE id=?', [employee_id]);
+  if (!e) throw new HttpError(400, 'Choose an employee.');
+  if (!e.is_active) throw new HttpError(400, 'That employee is inactive.');
+  return e;
+}
+
+app.get('/api/senders', auth(manage), h(async (req, res) => {
+  const [rows] = await pool.query(
+    `SELECT s.id, s.employee_id, s.is_active, e.employee_no, e.full_name, d.name dept_name
+     FROM senders s JOIN employees e ON e.id = s.employee_id
+     JOIN departments d ON d.id = e.department_id ORDER BY e.full_name`);
+  res.json(rows);
+}));
+
+app.post('/api/senders', auth(manage), h(async (req, res) => {
+  const e = await activeEmployee(req.body.employee_id);
+  try {
+    await pool.query('INSERT INTO senders (employee_id) VALUES (?)', [e.id]);
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') throw new HttpError(400, 'That employee is already a sender.');
+    throw err;
+  }
+  res.json({ ok: true });
+}));
+
+app.put('/api/senders/:id/toggle', auth(manage), h(async (req, res) => {
+  await pool.query('UPDATE senders SET is_active = 1 - is_active WHERE id=?', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+app.delete('/api/senders/:id', auth(manage), h(async (req, res) => {
+  await pool.query('DELETE FROM senders WHERE id=?', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+app.get('/api/receivers', auth(manage), h(async (req, res) => {
+  const [rows] = await pool.query(
+    `SELECT r.id, r.employee_id, r.is_active, e.employee_no, e.full_name, d.name dept_name
+     FROM receivers r JOIN employees e ON e.id = r.employee_id
+     JOIN departments d ON d.id = r.department_id ORDER BY e.full_name`);
+  res.json(rows);
+}));
+
+app.post('/api/receivers', auth(manage), h(async (req, res) => {
+  const e = await activeEmployee(req.body.employee_id);
+  const [[dept]] = await pool.query('SELECT * FROM departments WHERE id=?', [req.body.department_id]);
+  if (!dept || !dept.is_active) throw new HttpError(400, 'Choose an active receiving department.');
+  try {
+    await pool.query('INSERT INTO receivers (employee_id, department_id) VALUES (?,?)', [e.id, dept.id]);
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') throw new HttpError(400, 'That employee is already a receiver.');
+    throw err;
+  }
+  res.json({ ok: true });
+}));
+
+app.put('/api/receivers/:id/toggle', auth(manage), h(async (req, res) => {
+  await pool.query('UPDATE receivers SET is_active = 1 - is_active WHERE id=?', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+app.delete('/api/receivers/:id', auth(manage), h(async (req, res) => {
+  await pool.query('DELETE FROM receivers WHERE id=?', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+// ---------- user accounts ----------
+const ROLES = ['admin', 'clerk', 'sender', 'receiver', 'approver', 'office_staff'];
+
+function dropSessions(userId) {
+  for (const [t, u] of sessions) if (u.id === Number(userId)) sessions.delete(t);
+}
+
+function checkPassword(pw) {
+  if (!pw || pw.length < 8) throw new HttpError(400, 'Password must be at least 8 characters.');
+}
+
+async function checkUserFields({ full_name, role, department_id }) {
+  if (!(full_name || '').trim() || !department_id) throw new HttpError(400, 'Full name and department are required.');
+  if (!ROLES.includes(role)) throw new HttpError(400, 'Choose a valid role.');
+  const [[dept]] = await pool.query('SELECT * FROM departments WHERE id=?', [department_id]);
+  if (!dept || !dept.is_active) throw new HttpError(400, 'Choose an active department.');
+  return dept;
+}
+
+app.get('/api/users', auth(['admin']), h(async (req, res) => {
+  const [rows] = await pool.query(
+    `SELECT u.id, u.full_name, u.username, u.role, u.department_id, u.is_active, d.name dept_name
+     FROM users u JOIN departments d ON d.id = u.department_id ORDER BY u.full_name`);
+  res.json(rows);
+}));
+
+app.post('/api/users', auth(['admin']), h(async (req, res) => {
+  const { full_name, username, password, role, department_id } = req.body;
+  await checkUserFields(req.body);
+  if (!/^[A-Za-z0-9._-]{3,50}$/.test((username || '').trim()))
+    throw new HttpError(400, 'Username must be 3-50 characters: letters, numbers, dot, dash or underscore.');
+  checkPassword(password);
+  try {
+    await pool.query(
+      'INSERT INTO users (full_name, username, password_hash, role, department_id) VALUES (?,?,?,?,?)',
+      [full_name.trim(), username.trim(), await bcrypt.hash(password, 10), role, department_id]);
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') throw new HttpError(400, 'That username is already taken.');
+    throw e;
+  }
+  res.json({ ok: true });
+}));
+
+app.put('/api/users/:id', auth(['admin']), h(async (req, res) => {
+  const { full_name, role, department_id } = req.body;
+  const dept = await checkUserFields(req.body);
+  const isSelf = Number(req.params.id) === req.user.id;
+  if (isSelf && role !== req.user.role) throw new HttpError(400, 'You cannot change your own role.');
+  await pool.query('UPDATE users SET full_name=?, role=?, department_id=? WHERE id=?',
+    [full_name.trim(), role, department_id, req.params.id]);
+  if (isSelf) {
+    req.user.name = full_name.trim();
+    req.user.department_id = dept.id;
+    req.user.dept_name = dept.name;
+  } else {
+    dropSessions(req.params.id); // they log in again to get the new role
+  }
+  res.json({ ok: true });
+}));
+
+app.put('/api/users/:id/toggle', auth(['admin']), h(async (req, res) => {
+  if (Number(req.params.id) === req.user.id) throw new HttpError(400, 'You cannot deactivate your own account.');
+  await pool.query('UPDATE users SET is_active = 1 - is_active WHERE id=?', [req.params.id]);
+  dropSessions(req.params.id);
+  res.json({ ok: true });
+}));
+
+app.put('/api/users/:id/password', auth(['admin']), h(async (req, res) => {
+  checkPassword(req.body.new_password);
+  await pool.query('UPDATE users SET password_hash=? WHERE id=?',
+    [await bcrypt.hash(req.body.new_password, 10), req.params.id]);
+  if (Number(req.params.id) !== req.user.id) dropSessions(req.params.id);
+  res.json({ ok: true });
+}));
+
+app.delete('/api/users/:id', auth(['admin']), h(async (req, res) => {
+  if (Number(req.params.id) === req.user.id) throw new HttpError(400, 'You cannot delete your own account.');
+  try {
+    await pool.query('DELETE FROM users WHERE id=?', [req.params.id]);
+  } catch (e) {
+    if (e.code === 'ER_ROW_IS_REFERENCED_2')
+      throw new HttpError(400, 'This user has records (documents, routing, etc.) and cannot be deleted. Deactivate the account instead.');
+    throw e;
+  }
+  dropSessions(req.params.id);
+  res.json({ ok: true });
+}));
+
+// any logged-in user can change their own password
+app.post('/api/me/password', auth(), h(async (req, res) => {
+  const { current_password, new_password } = req.body;
+  const [[u]] = await pool.query('SELECT password_hash FROM users WHERE id=?', [req.user.id]);
+  if (!(await bcrypt.compare(current_password || '', u.password_hash)))
+    throw new HttpError(400, 'Current password is incorrect.');
+  checkPassword(new_password);
+  if (new_password === current_password) throw new HttpError(400, 'New password must be different.');
+  await pool.query('UPDATE users SET password_hash=? WHERE id=?', [await bcrypt.hash(new_password, 10), req.user.id]);
+  res.json({ ok: true });
+}));
+
 // ---------- documents ----------
 app.get('/api/documents', auth(), h(async (req, res) => {
   const { q = '', status = '' } = req.query;

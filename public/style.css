@@ -93,3 +93,11 @@ td.empty { text-align: center; color: var(--muted); padding: 1.5rem; }
 #toast.bad { background: var(--danger); }
 
 @media (prefers-reduced-motion: no-preference) { button { transition: background .15s; } }
+
+/* tabs and table buttons */
+.tabs { display: flex; gap: .25rem; margin-bottom: 1rem; border-bottom: 1px solid var(--line); }
+.tabs button { background: transparent; color: var(--ink); border-radius: 0; border-bottom: 3px solid transparent; }
+.tabs button:hover { background: #fff; }
+.tabs button.active { border-bottom-color: var(--brand); color: var(--brand); font-weight: 600; }
+.btn-row { display: flex; gap: .6rem; flex-wrap: wrap; }
+td .ghost { padding: .3rem .6rem; margin: 0 .15rem .15rem 0; font-size: .85rem; }

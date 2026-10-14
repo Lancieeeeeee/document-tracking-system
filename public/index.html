@@ -24,7 +24,7 @@
   <div id="app-view" hidden>
     <header>
       <h1>Document Tracking System</h1>
-      <div class="who"><span id="who"></span><button id="logout" class="ghost">Log out</button></div>
+      <div class="who"><span id="who"></span><button id="change-pw" class="ghost">Change password</button><button id="logout" class="ghost">Log out</button></div>
     </header>
     <nav id="nav">
       <button data-page="dashboard">Dashboard</button>
@@ -32,6 +32,8 @@
       <button data-page="register" data-roles="admin,clerk">Register document</button>
       <button data-page="overdue">Overdue</button>
       <button data-page="departments">Departments</button>
+      <button data-page="people" data-roles="admin,clerk">Senders &amp; Receivers</button>
+      <button data-page="users" data-roles="admin">Users</button>
     </nav>
 
     <main>
@@ -83,12 +85,83 @@
           <input id="dept-name" placeholder="New department name" required>
           <button type="submit">Add department</button>
         </form>
-
-<input id="dept-search" placeholder="Search departments" style="margin-bottom:1rem">
-
+        <input id="dept-search" placeholder="Search departments" style="margin-bottom:1rem">
         <table>
           <thead><tr><th>Department</th><th>Status</th><th></th></tr></thead>
           <tbody id="dept-rows"></tbody>
+        </table>
+      </section>
+
+      <section id="page-people" hidden>
+        <div class="tabs" id="people-tabs">
+          <button data-tab="employees" class="active">Employees</button>
+          <button data-tab="senders">Senders</button>
+          <button data-tab="receivers">Receivers</button>
+        </div>
+
+        <div id="tab-employees">
+          <form id="emp-form" class="panel form" style="margin-bottom:1rem">
+            <h2 id="emp-title">Register employee</h2>
+            <input type="hidden" id="emp-id">
+            <label>Employee no. <input id="emp-no" required></label>
+            <label>Full name <input id="emp-name" required></label>
+            <label>Position <input id="emp-pos"></label>
+            <label>Email <input id="emp-email" type="email"></label>
+            <label>Department <select id="emp-dept" required></select></label>
+            <div class="btn-row">
+              <button type="submit">Save</button>
+              <button type="button" id="emp-cancel" class="ghost" hidden>Cancel</button>
+            </div>
+          </form>
+          <div class="toolbar"><input id="emp-search" placeholder="Search employees"></div>
+          <table>
+            <thead><tr><th>Employee no.</th><th>Name</th><th>Position</th><th>Department</th><th>Status</th><th></th></tr></thead>
+            <tbody id="emp-rows"></tbody>
+          </table>
+        </div>
+
+        <div id="tab-senders" hidden>
+          <form id="snd-form" class="toolbar">
+            <select id="snd-emp" required></select>
+            <button type="submit">Register as sender</button>
+          </form>
+          <table>
+            <thead><tr><th>Employee no.</th><th>Name</th><th>Department</th><th>Status</th><th></th></tr></thead>
+            <tbody id="snd-rows"></tbody>
+          </table>
+        </div>
+
+        <div id="tab-receivers" hidden>
+          <form id="rcv-form" class="toolbar">
+            <select id="rcv-emp" required></select>
+            <select id="rcv-dept" required></select>
+            <button type="submit">Register as receiver</button>
+          </form>
+          <table>
+            <thead><tr><th>Employee no.</th><th>Name</th><th>Receiving department</th><th>Status</th><th></th></tr></thead>
+            <tbody id="rcv-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="page-users" hidden>
+        <form id="usr-form" class="panel form" style="margin-bottom:1rem">
+          <h2 id="usr-title">Create account</h2>
+          <input type="hidden" id="usr-id">
+          <label>Full name <input id="usr-name" required></label>
+          <label>Username <input id="usr-username" required></label>
+          <label id="usr-pw-label">Password (min. 8 characters) <input id="usr-pw" type="password"></label>
+          <label>Role <select id="usr-role" required></select></label>
+          <label>Department <select id="usr-dept" required></select></label>
+          <div class="btn-row">
+            <button type="submit">Save</button>
+            <button type="button" id="usr-cancel" class="ghost" hidden>Cancel</button>
+          </div>
+        </form>
+        <div class="toolbar"><input id="usr-search" placeholder="Search users"></div>
+        <table>
+          <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Department</th><th>Status</th><th></th></tr></thead>
+          <tbody id="usr-rows"></tbody>
         </table>
       </section>
     </main>

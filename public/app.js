@@ -88,7 +88,7 @@ function showPage(page) {
   currentPage = page;
   document.querySelectorAll('main > section').forEach((s) => (s.hidden = s.id !== 'page-' + page));
   document.querySelectorAll('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
-  ({ dashboard: loadDashboard, documents: loadDocuments, overdue: loadOverdue, departments: loadDepartments }[page] || (() => {}))();
+  ({ dashboard: loadDashboard, documents: loadDocuments, overdue: loadOverdue, departments: loadDepartments, people: loadPeople, users: loadUsers }[page] || (() => {}))();
 }
 
 // ---------- dashboard ----------
@@ -162,9 +162,6 @@ $('#overdue-rows').addEventListener('click', (e) => {
 });
 
 // ---------- departments ----------
-
-
-
 async function loadDepartments() {
   lookups = await api('/lookups');
   const isAdmin = user.role === 'admin';
@@ -305,6 +302,249 @@ $('#modal-body').addEventListener('click', async (e) => {
     toast('Saved.');
     await openDoc(id);
     showPage(currentPage);
+  } catch (err) { toast(err.message, true); }
+});
+
+// ---------- senders & receivers ----------
+let peopleTab = 'employees';
+let people = { employees: [], senders: [], receivers: [] };
+const activeText = (v) => (v ? 'Active' : 'Inactive');
+
+async function loadPeople() {
+  lookups = await api('/lookups');
+  const [employees, senders, receivers] = await Promise.all([api('/employees'), api('/senders'), api('/receivers')]);
+  people = { employees, senders, receivers };
+  const depts = lookups.departments.filter((d) => d.is_active);
+  fillSelect('#emp-dept', depts);
+  fillSelect('#rcv-dept', depts);
+  renderPeople();
+}
+
+function empOptions(list) {
+  return list.length
+    ? list.map((e) => `<option value="${e.id}">${esc(e.employee_no)} - ${esc(e.full_name)}</option>`).join('')
+    : '<option value="">No employees available</option>';
+}
+
+function renderPeople() {
+  ['employees', 'senders', 'receivers'].forEach((t) => { $('#tab-' + t).hidden = t !== peopleTab; });
+  document.querySelectorAll('#people-tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === peopleTab));
+  const none = (n) => `<tr><td class="empty" colspan="${n}">Nothing here yet.</td></tr>`;
+  const btn = (act, id, label) => `<button class="ghost" data-act="${act}" data-id="${id}">${label}</button>`;
+
+  const q = $('#emp-search').value.toLowerCase();
+  const emps = people.employees.filter((e) => `${e.employee_no} ${e.full_name} ${e.dept_name}`.toLowerCase().includes(q));
+  $('#emp-rows').innerHTML = emps.length ? emps.map((e) => `<tr>
+    <td>${esc(e.employee_no)}</td><td>${esc(e.full_name)}</td><td>${esc(e.position || '')}</td>
+    <td>${esc(e.dept_name)}</td><td>${activeText(e.is_active)}</td>
+    <td>${btn('emp-profile', e.id, 'Profile')}${btn('emp-edit', e.id, 'Edit')}
+      ${btn('emp-toggle', e.id, e.is_active ? 'Deactivate' : 'Activate')}${btn('emp-del', e.id, 'Delete')}</td></tr>`).join('') : none(6);
+
+  const eligible = people.employees.filter((e) => e.is_active);
+  $('#snd-emp').innerHTML = empOptions(eligible.filter((e) => !e.sender_id));
+  $('#rcv-emp').innerHTML = empOptions(eligible.filter((e) => !e.receiver_id));
+
+  const rowsFor = (list, prefix) => list.length ? list.map((p) => `<tr>
+    <td>${esc(p.employee_no)}</td><td>${esc(p.full_name)}</td><td>${esc(p.dept_name)}</td><td>${activeText(p.is_active)}</td>
+    <td>${btn('emp-profile', p.employee_id, 'Profile')}${btn(prefix + '-toggle', p.id, p.is_active ? 'Deactivate' : 'Activate')}
+      ${btn(prefix + '-del', p.id, 'Remove')}</td></tr>`).join('') : none(5);
+  $('#snd-rows').innerHTML = rowsFor(people.senders, 'snd');
+  $('#rcv-rows').innerHTML = rowsFor(people.receivers, 'rcv');
+}
+
+$('#people-tabs').addEventListener('click', (e) => {
+  if (e.target.dataset.tab) { peopleTab = e.target.dataset.tab; renderPeople(); }
+});
+$('#emp-search').addEventListener('input', renderPeople);
+
+function resetEmpForm() {
+  $('#emp-form').reset();
+  $('#emp-id').value = '';
+  $('#emp-title').textContent = 'Register employee';
+  $('#emp-cancel').hidden = true;
+}
+$('#emp-cancel').addEventListener('click', resetEmpForm);
+
+$('#emp-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = $('#emp-id').value;
+  const body = {
+    employee_no: $('#emp-no').value, full_name: $('#emp-name').value, position: $('#emp-pos').value,
+    email: $('#emp-email').value, department_id: $('#emp-dept').value,
+  };
+  try {
+    await api(id ? `/employees/${id}` : '/employees', id ? 'PUT' : 'POST', body);
+    toast('Saved.');
+    resetEmpForm();
+    loadPeople();
+  } catch (err) { toast(err.message, true); }
+});
+
+$('#snd-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('/senders', 'POST', { employee_id: $('#snd-emp').value });
+    toast('Sender registered.');
+    loadPeople();
+  } catch (err) { toast(err.message, true); }
+});
+
+$('#rcv-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('/receivers', 'POST', { employee_id: $('#rcv-emp').value, department_id: $('#rcv-dept').value });
+    toast('Receiver registered.');
+    loadPeople();
+  } catch (err) { toast(err.message, true); }
+});
+
+async function showEmployee(id) {
+  const { employee: e, sender, receiver } = await api('/employees/' + id);
+  $('#modal-body').dataset.id = '';
+  $('#modal-body').innerHTML = `
+    <h2>${esc(e.full_name)}</h2>
+    <dl class="meta">
+      <div><dt>Employee no.</dt><dd>${esc(e.employee_no)}</dd></div>
+      <div><dt>Position</dt><dd>${esc(e.position || '-')}</dd></div>
+      <div><dt>Email</dt><dd>${esc(e.email || '-')}</dd></div>
+      <div><dt>Department</dt><dd>${esc(e.dept_name)}</dd></div>
+      <div><dt>Status</dt><dd>${activeText(e.is_active)}</dd></div>
+      <div><dt>Sender</dt><dd>${sender ? 'Registered (' + activeText(sender.is_active) + ')' : 'Not registered'}</dd></div>
+      <div><dt>Receiver</dt><dd>${receiver ? 'Registered for ' + esc(receiver.dept_name) + ' (' + activeText(receiver.is_active) + ')' : 'Not registered'}</dd></div>
+    </dl>`;
+  $('#modal').hidden = false;
+}
+
+$('#page-people').addEventListener('click', async (e) => {
+  const { act, id } = e.target.dataset;
+  if (!act) return;
+  try {
+    if (act === 'emp-profile') return await showEmployee(id);
+    if (act === 'emp-edit') {
+      const emp = people.employees.find((x) => x.id == id);
+      $('#emp-id').value = emp.id;
+      $('#emp-no').value = emp.employee_no;
+      $('#emp-name').value = emp.full_name;
+      $('#emp-pos').value = emp.position || '';
+      $('#emp-email').value = emp.email || '';
+      $('#emp-dept').value = emp.department_id;
+      $('#emp-title').textContent = 'Edit employee';
+      $('#emp-cancel').hidden = false;
+      $('#emp-form').scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+    if (act === 'emp-toggle') await api(`/employees/${id}/toggle`, 'PUT');
+    if (act === 'emp-del') { if (!confirm('Delete this employee?')) return; await api(`/employees/${id}`, 'DELETE'); }
+    if (act === 'snd-toggle') await api(`/senders/${id}/toggle`, 'PUT');
+    if (act === 'snd-del') { if (!confirm('Remove this sender?')) return; await api(`/senders/${id}`, 'DELETE'); }
+    if (act === 'rcv-toggle') await api(`/receivers/${id}/toggle`, 'PUT');
+    if (act === 'rcv-del') { if (!confirm('Remove this receiver?')) return; await api(`/receivers/${id}`, 'DELETE'); }
+    loadPeople();
+  } catch (err) { toast(err.message, true); }
+});
+
+// ---------- user accounts ----------
+const ROLE_LABELS = { admin: 'Admin', clerk: 'Clerk', sender: 'Sender', receiver: 'Receiver', approver: 'Approver', office_staff: 'Office Staff' };
+let usersList = [];
+
+async function loadUsers() {
+  lookups = await api('/lookups');
+  usersList = await api('/users');
+  $('#usr-role').innerHTML = Object.entries(ROLE_LABELS).map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+  fillSelect('#usr-dept', lookups.departments.filter((d) => d.is_active));
+  renderUsers();
+}
+
+function renderUsers() {
+  const q = $('#usr-search').value.toLowerCase();
+  const list = usersList.filter((u) => `${u.full_name} ${u.username} ${u.role} ${u.dept_name}`.toLowerCase().includes(q));
+  const btn = (act, id, label) => `<button class="ghost" data-act="${act}" data-id="${id}">${label}</button>`;
+  $('#usr-rows').innerHTML = list.length ? list.map((u) => `<tr>
+    <td>${esc(u.full_name)}</td><td>${esc(u.username)}</td><td>${ROLE_LABELS[u.role] || esc(u.role)}</td>
+    <td>${esc(u.dept_name)}</td><td>${u.is_active ? 'Active' : 'Inactive'}</td>
+    <td>${btn('usr-edit', u.id, 'Edit')}${btn('usr-pw', u.id, 'Reset password')}
+      ${btn('usr-toggle', u.id, u.is_active ? 'Deactivate' : 'Activate')}${btn('usr-del', u.id, 'Delete')}</td></tr>`).join('')
+    : '<tr><td class="empty" colspan="6">No users found.</td></tr>';
+}
+$('#usr-search').addEventListener('input', renderUsers);
+
+function resetUsrForm() {
+  $('#usr-form').reset();
+  $('#usr-id').value = '';
+  $('#usr-title').textContent = 'Create account';
+  $('#usr-username').disabled = false;
+  $('#usr-pw-label').hidden = false;
+  $('#usr-cancel').hidden = true;
+}
+$('#usr-cancel').addEventListener('click', resetUsrForm);
+
+$('#usr-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = $('#usr-id').value;
+  const body = { full_name: $('#usr-name').value, role: $('#usr-role').value, department_id: $('#usr-dept').value };
+  try {
+    if (id) {
+      await api(`/users/${id}`, 'PUT', body);
+    } else {
+      await api('/users', 'POST', { ...body, username: $('#usr-username').value, password: $('#usr-pw').value });
+    }
+    toast('Saved.');
+    resetUsrForm();
+    loadUsers();
+  } catch (err) { toast(err.message, true); }
+});
+
+$('#page-users').addEventListener('click', async (e) => {
+  const { act, id } = e.target.dataset;
+  if (!act) return;
+  const u = usersList.find((x) => x.id == id);
+  try {
+    if (act === 'usr-edit') {
+      $('#usr-id').value = u.id;
+      $('#usr-name').value = u.full_name;
+      $('#usr-username').value = u.username;
+      $('#usr-username').disabled = true;
+      $('#usr-pw-label').hidden = true;
+      $('#usr-role').value = u.role;
+      $('#usr-dept').value = u.department_id;
+      $('#usr-title').textContent = 'Edit account';
+      $('#usr-cancel').hidden = false;
+      $('#usr-form').scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+    if (act === 'usr-pw') {
+      const pw = prompt(`New password for ${u.username} (min. 8 characters):`);
+      if (!pw) return;
+      await api(`/users/${id}/password`, 'PUT', { new_password: pw });
+      toast('Password reset.');
+      return;
+    }
+    if (act === 'usr-toggle') await api(`/users/${id}/toggle`, 'PUT');
+    if (act === 'usr-del') { if (!confirm(`Delete ${u.username}?`)) return; await api(`/users/${id}`, 'DELETE'); }
+    loadUsers();
+  } catch (err) { toast(err.message, true); }
+});
+
+// ---------- change my own password ----------
+$('#change-pw').addEventListener('click', () => {
+  $('#modal-body').dataset.id = '';
+  $('#modal-body').innerHTML = `<h2>Change password</h2>
+    <form id="pw-form" class="form">
+      <label>Current password <input id="pw-cur" type="password" required></label>
+      <label>New password (min. 8 characters) <input id="pw-new" type="password" required minlength="8"></label>
+      <label>Confirm new password <input id="pw-new2" type="password" required></label>
+      <button type="submit">Save password</button>
+    </form>`;
+  $('#modal').hidden = false;
+});
+$('#modal-body').addEventListener('submit', async (e) => {
+  if (e.target.id !== 'pw-form') return;
+  e.preventDefault();
+  if ($('#pw-new').value !== $('#pw-new2').value) return toast('The new passwords do not match.', true);
+  try {
+    await api('/me/password', 'POST', { current_password: $('#pw-cur').value, new_password: $('#pw-new').value });
+    $('#modal').hidden = true;
+    toast('Password changed.');
   } catch (err) { toast(err.message, true); }
 });
 

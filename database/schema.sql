@@ -1,10 +1,12 @@
--- Document Tracking System: run this whole file in MySQL Workbench 8.0
+-- Document Tracking System (17 tables). WARNING: this DROPS and recreates every table, so run it only on a fresh setup.
+-- Run this whole file in MySQL Workbench 8.0
 CREATE DATABASE IF NOT EXISTS dts_db;
 USE dts_db;
 
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS tracking_history, releases, approvals, routing, documents,
-                     doc_counters, document_types, users, departments;
+DROP TABLE IF EXISTS audit_logs, notifications, files, tracking_history, releases, approvals, routing,
+                     documents, doc_counters, document_types, receivers, senders, employees, statuses,
+                     roles, users, departments;
 SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE departments (
@@ -18,7 +20,7 @@ CREATE TABLE users (
   full_name VARCHAR(100) NOT NULL,
   username VARCHAR(50) NOT NULL UNIQUE,
   password_hash VARCHAR(100) NOT NULL,
-  role ENUM('admin','clerk','receiver','approver') NOT NULL,
+  role ENUM('admin','clerk','sender','receiver','approver','office_staff') NOT NULL,
   department_id INT NOT NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   FOREIGN KEY (department_id) REFERENCES departments(id)
@@ -104,9 +106,93 @@ CREATE TABLE tracking_history (
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
+CREATE TABLE roles (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(50) NOT NULL UNIQUE
+);
+
+CREATE TABLE statuses (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(30) NOT NULL UNIQUE
+);
+
+CREATE TABLE employees (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  employee_no VARCHAR(30) NOT NULL UNIQUE,
+  full_name VARCHAR(100) NOT NULL,
+  position VARCHAR(80),
+  email VARCHAR(100),
+  department_id INT NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  FOREIGN KEY (department_id) REFERENCES departments(id)
+);
+
+CREATE TABLE senders (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  employee_id INT NOT NULL UNIQUE,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  FOREIGN KEY (employee_id) REFERENCES employees(id)
+);
+
+CREATE TABLE receivers (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  employee_id INT NOT NULL UNIQUE,
+  department_id INT NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  FOREIGN KEY (employee_id) REFERENCES employees(id),
+  FOREIGN KEY (department_id) REFERENCES departments(id)
+);
+
+CREATE TABLE files (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  document_id INT NOT NULL,
+  original_name VARCHAR(255) NOT NULL,
+  stored_name VARCHAR(255) NOT NULL,
+  file_type VARCHAR(100),
+  file_size INT,
+  uploaded_by INT NOT NULL,
+  uploaded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (document_id) REFERENCES documents(id),
+  FOREIGN KEY (uploaded_by) REFERENCES users(id)
+);
+
+CREATE TABLE notifications (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  document_id INT NULL,
+  message VARCHAR(255) NOT NULL,
+  is_read TINYINT(1) NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (document_id) REFERENCES documents(id)
+);
+
+CREATE TABLE audit_logs (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  action VARCHAR(50) NOT NULL,
+  document_id INT NULL,
+  details VARCHAR(300),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (document_id) REFERENCES documents(id)
+);
+
 -- starting data (users are created automatically when the server first runs)
 INSERT INTO departments (name) VALUES
   ('Records Office'), ('Registrar'), ('Accounting'), ('College Dean'), ('President');
 
 INSERT INTO document_types (name) VALUES
   ('Memo'), ('Letter'), ('Request'), ('Purchase Request'), ('Travel Order');
+
+INSERT INTO roles (name) VALUES
+  ('Admin'), ('Clerk'), ('Sender'), ('Receiver'), ('Approver'), ('Office Staff');
+
+INSERT INTO statuses (name) VALUES
+  ('Registered'), ('Routed'), ('Received'), ('Returned'),
+  ('Approved'), ('Rejected'), ('Released'), ('Archived');
+
+INSERT INTO employees (employee_no, full_name, position, email, department_id) VALUES
+  ('EMP-001', 'Maria Santos', 'Records Officer', 'maria@school.edu', 1),
+  ('EMP-002', 'Juan Dela Cruz', 'Registrar Staff', 'juan@school.edu', 2),
+  ('EMP-003', 'Ana Reyes', 'Accountant', 'ana@school.edu', 3);
