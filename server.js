@@ -394,6 +394,42 @@ app.post('/api/me/password', auth(), h(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- document types ----------
+app.get('/api/document-types', auth(manage), h(async (req, res) => {
+  const [rows] = await pool.query(
+    `SELECT t.id, t.name, COUNT(d.id) doc_count
+     FROM document_types t LEFT JOIN documents d ON d.type_id = t.id
+     GROUP BY t.id, t.name ORDER BY t.name`);
+  res.json(rows);
+}));
+
+async function saveDocType(req, res, id) {
+  const name = (req.body.name || '').trim();
+  if (!name) throw new HttpError(400, 'Document type name is required.');
+  if (name.length > 80) throw new HttpError(400, 'Document type name must be 80 characters or less.');
+  try {
+    if (id) await pool.query('UPDATE document_types SET name=? WHERE id=?', [name, id]);
+    else await pool.query('INSERT INTO document_types (name) VALUES (?)', [name]);
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') throw new HttpError(400, 'That document type already exists.');
+    throw e;
+  }
+  res.json({ ok: true });
+}
+app.post('/api/document-types', auth(manage), h((req, res) => saveDocType(req, res)));
+app.put('/api/document-types/:id', auth(manage), h((req, res) => saveDocType(req, res, req.params.id)));
+
+app.delete('/api/document-types/:id', auth(manage), h(async (req, res) => {
+  try {
+    await pool.query('DELETE FROM document_types WHERE id=?', [req.params.id]);
+  } catch (e) {
+    if (e.code === 'ER_ROW_IS_REFERENCED_2')
+      throw new HttpError(400, 'This document type is used by existing documents and cannot be deleted.');
+    throw e;
+  }
+  res.json({ ok: true });
+}));
+
 // ---------- documents ----------
 app.get('/api/documents', auth(), h(async (req, res) => {
   const { q = '', status = '' } = req.query;

@@ -88,7 +88,7 @@ function showPage(page) {
   currentPage = page;
   document.querySelectorAll('main > section').forEach((s) => (s.hidden = s.id !== 'page-' + page));
   document.querySelectorAll('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
-  ({ dashboard: loadDashboard, documents: loadDocuments, overdue: loadOverdue, departments: loadDepartments, people: loadPeople, users: loadUsers }[page] || (() => {}))();
+  ({ dashboard: loadDashboard, documents: loadDocuments, overdue: loadOverdue, departments: loadDepartments, people: loadPeople, users: loadUsers, register: loadRegister, doctypes: loadDocTypes }[page] || (() => {}))();
 }
 
 // ---------- dashboard ----------
@@ -545,6 +545,73 @@ $('#modal-body').addEventListener('submit', async (e) => {
     await api('/me/password', 'POST', { current_password: $('#pw-cur').value, new_password: $('#pw-new').value });
     $('#modal').hidden = true;
     toast('Password changed.');
+  } catch (err) { toast(err.message, true); }
+});
+
+// ---------- register page (refresh lists each time) ----------
+async function loadRegister() {
+  lookups = await api('/lookups');
+  fillSelect('#r-type', lookups.types);
+  fillSelect('#r-dept', lookups.departments.filter((d) => d.is_active));
+}
+
+// ---------- document types ----------
+let docTypes = [];
+
+async function loadDocTypes() {
+  docTypes = await api('/document-types');
+  renderDocTypes();
+}
+
+function renderDocTypes() {
+  const q = $('#dt-search').value.toLowerCase();
+  const list = docTypes.filter((t) => t.name.toLowerCase().includes(q));
+  $('#dt-rows').innerHTML = list.length ? list.map((t) => `<tr>
+    <td>${esc(t.name)}</td><td>${t.doc_count}</td>
+    <td><button class="ghost" data-act="dt-edit" data-id="${t.id}">Edit</button>
+      <button class="ghost" data-act="dt-del" data-id="${t.id}">Delete</button></td></tr>`).join('')
+    : '<tr><td class="empty" colspan="3">No document types found.</td></tr>';
+}
+$('#dt-search').addEventListener('input', renderDocTypes);
+
+function resetDtForm() {
+  $('#dt-form').reset();
+  $('#dt-id').value = '';
+  $('#dt-title').textContent = 'Add document type';
+  $('#dt-cancel').hidden = true;
+}
+$('#dt-cancel').addEventListener('click', resetDtForm);
+
+$('#dt-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = $('#dt-id').value;
+  try {
+    await api(id ? `/document-types/${id}` : '/document-types', id ? 'PUT' : 'POST', { name: $('#dt-name').value });
+    toast('Saved.');
+    resetDtForm();
+    loadDocTypes();
+  } catch (err) { toast(err.message, true); }
+});
+
+$('#dt-rows').addEventListener('click', async (e) => {
+  const { act, id } = e.target.dataset;
+  if (!act) return;
+  const t = docTypes.find((x) => x.id == id);
+  try {
+    if (act === 'dt-edit') {
+      $('#dt-id').value = t.id;
+      $('#dt-name').value = t.name;
+      $('#dt-title').textContent = 'Edit document type';
+      $('#dt-cancel').hidden = false;
+      $('#dt-form').scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+    if (act === 'dt-del') {
+      if (!confirm(`Delete "${t.name}"?`)) return;
+      await api(`/document-types/${id}`, 'DELETE');
+      toast('Deleted.');
+      loadDocTypes();
+    }
   } catch (err) { toast(err.message, true); }
 });
 

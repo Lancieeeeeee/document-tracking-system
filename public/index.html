@@ -32,6 +32,7 @@
       <button data-page="register" data-roles="admin,clerk">Register document</button>
       <button data-page="overdue">Overdue</button>
       <button data-page="departments">Departments</button>
+      <button data-page="doctypes" data-roles="admin,clerk">Document Types</button>
       <button data-page="people" data-roles="admin,clerk">Senders &amp; Receivers</button>
       <button data-page="users" data-roles="admin">Users</button>
     </nav>
@@ -162,6 +163,23 @@
         <table>
           <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Department</th><th>Status</th><th></th></tr></thead>
           <tbody id="usr-rows"></tbody>
+        </table>
+      </section>
+
+      <section id="page-doctypes" hidden>
+        <form id="dt-form" class="panel form" style="margin-bottom:1rem">
+          <h2 id="dt-title">Add document type</h2>
+          <input type="hidden" id="dt-id">
+          <label>Type name <input id="dt-name" maxlength="80" placeholder="e.g. Memo" required></label>
+          <div class="btn-row">
+            <button type="submit">Save</button>
+            <button type="button" id="dt-cancel" class="ghost" hidden>Cancel</button>
+          </div>
+        </form>
+        <div class="toolbar"><input id="dt-search" placeholder="Search document types"></div>
+        <table>
+          <thead><tr><th>Document type</th><th>Documents</th><th></th></tr></thead>
+          <tbody id="dt-rows"></tbody>
         </table>
       </section>
     </main>
