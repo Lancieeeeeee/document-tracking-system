@@ -196,3 +196,17 @@ INSERT INTO employees (employee_no, full_name, position, email, department_id) V
   ('EMP-001', 'Maria Santos', 'Records Officer', 'maria@school.edu', 1),
   ('EMP-002', 'Juan Dela Cruz', 'Registrar Staff', 'juan@school.edu', 2),
   ('EMP-003', 'Ana Reyes', 'Accountant', 'ana@school.edu', 3);
+
+-- links added after all tables exist (WP10-WP13)
+
+ALTER TABLE documents
+  ADD COLUMN sender_id INT NULL AFTER origin_dept_id,
+  ADD CONSTRAINT fk_documents_sender FOREIGN KEY (sender_id) REFERENCES senders(id);
+
+ALTER TABLE routing
+  ADD COLUMN receiver_id INT NULL AFTER to_dept_id,
+  ADD COLUMN due_date DATE NULL AFTER instructions,
+  ADD CONSTRAINT fk_routing_receiver FOREIGN KEY (receiver_id) REFERENCES receivers(id);
+
+ALTER TABLE routing
+  MODIFY status ENUM('Pending','Received','Returned','Rejected') NOT NULL DEFAULT 'Pending';

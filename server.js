@@ -4,6 +4,8 @@ const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 
 const OVERDUE_DAYS = 3; // a routed document not received after this many days is overdue
 
@@ -118,7 +120,15 @@ app.post('/api/logout', auth(), h(async (req, res) => {
 app.get('/api/lookups', auth(), h(async (req, res) => {
   const [departments] = await pool.query('SELECT id, name, is_active FROM departments ORDER BY name');
   const [types] = await pool.query('SELECT id, name FROM document_types ORDER BY name');
-  res.json({ departments, types });
+  const [senders] = await pool.query(
+    `SELECT s.id, CONCAT(e.employee_no, ' - ', e.full_name) name
+     FROM senders s JOIN employees e ON e.id = s.employee_id
+     WHERE s.is_active = 1 AND e.is_active = 1 ORDER BY e.full_name`);
+  const [receivers] = await pool.query(
+    `SELECT r.id, r.department_id, CONCAT(e.employee_no, ' - ', e.full_name) name
+     FROM receivers r JOIN employees e ON e.id = r.employee_id
+     WHERE r.is_active = 1 AND e.is_active = 1 ORDER BY e.full_name`);
+  res.json({ departments, types, senders, receivers });
 }));
 
 app.post('/api/departments', auth(['admin']), h(async (req, res) => {
@@ -430,6 +440,180 @@ app.delete('/api/document-types/:id', auth(manage), h(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- file uploads ----------
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
+const FILE_TYPES = {
+  '.pdf': ['application/pdf'],
+  '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  '.png': ['image/png'],
+  '.jpg': ['image/jpeg'],
+  '.jpeg': ['image/jpeg'],
+  '.gif': ['image/gif'],
+  '.webp': ['image/webp'],
+};
+const TYPE_MESSAGE = 'Only PDF, DOCX, XLSX and image files (PNG, JPG, GIF, WEBP) are allowed.';
+const fileRoles = ['admin', 'clerk', 'sender'];
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: UPLOAD_DIR,
+    // stored under a unique name; the original name is kept in the database
+    filename: (req, file, cb) =>
+      cb(null, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}${path.extname(file.originalname).toLowerCase()}`),
+  }),
+  limits: { fileSize: MAX_FILE_BYTES, files: 1 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const ok = FILE_TYPES[ext] && (FILE_TYPES[ext].includes(file.mimetype) || file.mimetype === 'application/octet-stream');
+    cb(ok ? null : new HttpError(400, TYPE_MESSAGE), !!ok);
+  },
+});
+
+const removeFile = (name) => fs.unlink(path.join(UPLOAD_DIR, name), () => {});
+
+function receiveFile(req, res) {
+  return new Promise((resolve, reject) => {
+    upload.single('file')(req, res, (err) => {
+      if (err) {
+        if (err.code === 'LIMIT_FILE_SIZE') return reject(new HttpError(400, 'File is too large. The maximum size is 5 MB.'));
+        if (err instanceof HttpError) return reject(err);
+        return reject(new HttpError(400, 'Upload failed: ' + err.message));
+      }
+      if (!req.file) return reject(new HttpError(400, 'Choose a file to upload.'));
+      resolve(req.file);
+    });
+  });
+}
+
+// the first bytes of the file must match the type it claims to be
+function verifySignature(file) {
+  const ext = path.extname(file.originalname).toLowerCase();
+  const buf = Buffer.alloc(12);
+  const fd = fs.openSync(file.path, 'r');
+  fs.readSync(fd, buf, 0, 12, 0);
+  fs.closeSync(fd);
+  const head = buf.toString('latin1');
+  let ok = false;
+  if (ext === '.pdf') ok = head.startsWith('%PDF');
+  else if (ext === '.docx' || ext === '.xlsx') ok = buf[0] === 0x50 && buf[1] === 0x4b;
+  else if (ext === '.png') ok = buf[0] === 0x89 && head.slice(1, 4) === 'PNG';
+  else if (ext === '.jpg' || ext === '.jpeg') ok = buf[0] === 0xff && buf[1] === 0xd8;
+  else if (ext === '.gif') ok = head.startsWith('GIF8');
+  else if (ext === '.webp') ok = head.slice(0, 4) === 'RIFF' && head.slice(8, 12) === 'WEBP';
+  if (!ok) {
+    removeFile(file.filename);
+    throw new HttpError(400, 'The file content does not match its type.');
+  }
+}
+
+const originalName = (file) => Buffer.from(file.originalname, 'latin1').toString('utf8').slice(0, 255);
+
+app.post('/api/documents/:id/files', auth(fileRoles), h(async (req, res) => {
+  const file = await receiveFile(req, res);
+  try {
+    verifySignature(file);
+    const name = originalName(file);
+    await tx(async (conn) => {
+      const doc = await getDoc(conn, req.params.id);
+      if (doc.status === 'Released') throw new HttpError(400, 'Files cannot be changed after the document is released.');
+      await conn.query(
+        `INSERT INTO files (document_id, original_name, stored_name, file_type, file_size, uploaded_by)
+         VALUES (?,?,?,?,?,?)`,
+        [doc.id, name, file.filename, file.mimetype, file.size, req.user.id]);
+      await track(conn, doc.id, 'File uploaded', name, req.user.id);
+    });
+  } catch (e) {
+    removeFile(file.filename);
+    throw e;
+  }
+  res.json({ ok: true });
+}));
+
+app.put('/api/files/:id', auth(fileRoles), h(async (req, res) => {
+  const file = await receiveFile(req, res);
+  let oldStored;
+  try {
+    verifySignature(file);
+    const name = originalName(file);
+    await tx(async (conn) => {
+      const [[f]] = await conn.query(
+        `SELECT f.*, d.status FROM files f JOIN documents d ON d.id = f.document_id WHERE f.id=? FOR UPDATE`, [req.params.id]);
+      if (!f) throw new HttpError(404, 'File not found.');
+      if (f.status === 'Released') throw new HttpError(400, 'Files cannot be changed after the document is released.');
+      if (req.user.role === 'sender' && f.uploaded_by !== req.user.id)
+        throw new HttpError(403, 'You can only replace files you uploaded.');
+      await conn.query(
+        `UPDATE files SET original_name=?, stored_name=?, file_type=?, file_size=?, uploaded_by=?, uploaded_at=NOW() WHERE id=?`,
+        [name, file.filename, file.mimetype, file.size, req.user.id, f.id]);
+      await track(conn, f.document_id, 'File replaced', `${f.original_name} -> ${name}`, req.user.id);
+      oldStored = f.stored_name;
+    });
+  } catch (e) {
+    removeFile(file.filename);
+    throw e;
+  }
+  removeFile(oldStored);
+  res.json({ ok: true });
+}));
+
+app.delete('/api/files/:id', auth(fileRoles), h(async (req, res) => {
+  let stored;
+  await tx(async (conn) => {
+    const [[f]] = await conn.query(
+      `SELECT f.*, d.status FROM files f JOIN documents d ON d.id = f.document_id WHERE f.id=? FOR UPDATE`, [req.params.id]);
+    if (!f) throw new HttpError(404, 'File not found.');
+    if (f.status === 'Released') throw new HttpError(400, 'Files cannot be changed after the document is released.');
+    if (req.user.role === 'sender' && f.uploaded_by !== req.user.id)
+      throw new HttpError(403, 'You can only delete files you uploaded.');
+    await conn.query('DELETE FROM files WHERE id=?', [f.id]);
+    await track(conn, f.document_id, 'File deleted', f.original_name, req.user.id);
+    stored = f.stored_name;
+  });
+  removeFile(stored);
+  res.json({ ok: true });
+}));
+
+app.get('/api/files/:id/download', auth(), h(async (req, res) => {
+  const [[f]] = await pool.query('SELECT * FROM files WHERE id=?', [req.params.id]);
+  if (!f) throw new HttpError(404, 'File not found.');
+  const full = path.join(UPLOAD_DIR, f.stored_name);
+  if (!fs.existsSync(full)) throw new HttpError(404, 'The file is missing from the server.');
+  res.download(full, f.original_name);
+}));
+
+// ---------- inbox (documents routed to my department) ----------
+app.get('/api/inbox', auth(), h(async (req, res) => {
+  const { q = '', status = '', sort = 'newest' } = req.query;
+  const orderBy = {
+    newest: 'r.routed_at DESC',
+    oldest: 'r.routed_at ASC',
+    due: 'r.due_date IS NULL, r.due_date ASC',
+    title: 'd.title ASC',
+  }[sort] || 'r.routed_at DESC';
+  let sql = `SELECT r.id routing_id, d.id doc_id, d.doc_number, d.title, tp.name type_name,
+      f.name from_name, t.name to_name, r.status, r.routed_at,
+      DATE_FORMAT(r.due_date, '%Y-%m-%d') due_date,
+      CONCAT(e.employee_no, ' - ', e.full_name) receiver_name,
+      (r.status = 'Pending' AND (r.routed_at < NOW() - INTERVAL ${OVERDUE_DAYS} DAY OR r.due_date < CURDATE())) overdue
+    FROM routing r
+    JOIN documents d ON d.id = r.document_id
+    JOIN document_types tp ON tp.id = d.type_id
+    JOIN departments f ON f.id = r.from_dept_id
+    JOIN departments t ON t.id = r.to_dept_id
+    LEFT JOIN receivers rc ON rc.id = r.receiver_id
+    LEFT JOIN employees e ON e.id = rc.employee_id
+    WHERE (d.doc_number LIKE ? OR d.title LIKE ?)`;
+  const params = [`%${q}%`, `%${q}%`];
+  if (req.user.role !== 'admin') { sql += ' AND r.to_dept_id = ?'; params.push(req.user.department_id); }
+  if (status) { sql += ' AND r.status = ?'; params.push(status); }
+  sql += ` ORDER BY ${orderBy}`;
+  const [rows] = await pool.query(sql, params);
+  res.json(rows);
+}));
+
 // ---------- documents ----------
 app.get('/api/documents', auth(), h(async (req, res) => {
   const { q = '', status = '' } = req.query;
@@ -447,9 +631,14 @@ app.get('/api/documents', auth(), h(async (req, res) => {
 
 // register a document with automatic, duplicate-proof numbering
 app.post('/api/documents', auth(['admin', 'clerk']), h(async (req, res) => {
-  const { title, description, type_id, origin_dept_id } = req.body;
+  const { title, description, type_id, origin_dept_id, sender_id } = req.body;
   if (!title || !type_id || !origin_dept_id)
     throw new HttpError(400, 'Title, document type and origin department are required.');
+  if (!sender_id) throw new HttpError(400, 'Choose a sender. Register senders first in Senders & Receivers.');
+  const [[snd]] = await pool.query(
+    `SELECT s.id FROM senders s JOIN employees e ON e.id = s.employee_id
+     WHERE s.id=? AND s.is_active=1 AND e.is_active=1`, [sender_id]);
+  if (!snd) throw new HttpError(400, 'That sender is not registered or is inactive.');
   const result = await tx(async (conn) => {
     const year = new Date().getFullYear();
     await conn.query(
@@ -459,8 +648,8 @@ app.post('/api/documents', auth(['admin', 'clerk']), h(async (req, res) => {
     const [[{ last_no }]] = await conn.query('SELECT last_no FROM doc_counters WHERE year=?', [year]);
     const num = `DTS-${year}-${String(last_no).padStart(5, '0')}`;
     const [r] = await conn.query(
-      'INSERT INTO documents (doc_number, title, description, type_id, origin_dept_id, created_by) VALUES (?,?,?,?,?,?)',
-      [num, title.trim(), description || null, type_id, origin_dept_id, req.user.id]
+      'INSERT INTO documents (doc_number, title, description, type_id, origin_dept_id, sender_id, created_by) VALUES (?,?,?,?,?,?,?)',
+      [num, title.trim(), description || null, type_id, origin_dept_id, snd.id, req.user.id]
     );
     await track(conn, r.insertId, 'Registered', `Registered as ${num}`, req.user.id);
     return { id: r.insertId, doc_number: num };
@@ -471,20 +660,27 @@ app.post('/api/documents', auth(['admin', 'clerk']), h(async (req, res) => {
 // document profile: details + routing + approvals + release + tracking history
 app.get('/api/documents/:id', auth(), h(async (req, res) => {
   const [[doc]] = await pool.query(
-    `SELECT d.*, t.name type_name, o.name origin_name, u.full_name created_by_name
+    `SELECT d.*, t.name type_name, o.name origin_name, u.full_name created_by_name,
+            CONCAT(se.employee_no, ' - ', se.full_name) sender_name
      FROM documents d
      JOIN document_types t ON t.id = d.type_id
      JOIN departments o ON o.id = d.origin_dept_id
      JOIN users u ON u.id = d.created_by
+     LEFT JOIN senders sn ON sn.id = d.sender_id
+     LEFT JOIN employees se ON se.id = sn.employee_id
      WHERE d.id=?`, [req.params.id]);
   if (!doc) throw new HttpError(404, 'Document not found.');
   const [routing] = await pool.query(
-    `SELECT r.*, f.name from_name, t.name to_name, u.full_name routed_by_name, rc.full_name received_by_name
+    `SELECT r.*, DATE_FORMAT(r.due_date, '%Y-%m-%d') due_date, f.name from_name, t.name to_name,
+            u.full_name routed_by_name, rc.full_name received_by_name,
+            CONCAT(re.employee_no, ' - ', re.full_name) receiver_name
      FROM routing r
      JOIN departments f ON f.id = r.from_dept_id
      JOIN departments t ON t.id = r.to_dept_id
      JOIN users u ON u.id = r.routed_by
      LEFT JOIN users rc ON rc.id = r.received_by
+     LEFT JOIN receivers rv ON rv.id = r.receiver_id
+     LEFT JOIN employees re ON re.id = rv.employee_id
      WHERE r.document_id=? ORDER BY r.id`, [doc.id]);
   const [approvals] = await pool.query(
     `SELECT a.*, u.full_name approver_name FROM approvals a
@@ -495,13 +691,21 @@ app.get('/api/documents/:id', auth(), h(async (req, res) => {
   const [history] = await pool.query(
     `SELECT h.*, u.full_name user_name FROM tracking_history h
      JOIN users u ON u.id = h.user_id WHERE h.document_id=? ORDER BY h.id`, [doc.id]);
-  res.json({ doc, routing, approvals, releases, history });
+  const [files] = await pool.query(
+    `SELECT f.*, u.full_name uploaded_by_name FROM files f
+     JOIN users u ON u.id = f.uploaded_by WHERE f.document_id=? ORDER BY f.id`, [doc.id]);
+  res.json({ doc, routing, approvals, releases, files, history });
 }));
 
 // route a document to another department
 app.post('/api/documents/:id/route', auth(), h(async (req, res) => {
-  const { to_dept_id, purpose, instructions } = req.body;
+  const { to_dept_id, receiver_id, due_date, purpose, instructions } = req.body;
   if (!to_dept_id) throw new HttpError(400, 'Choose a destination department.');
+  const todayStr = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  if (due_date) {
+    const valid = /^\d{4}-\d{2}-\d{2}$/.test(due_date) && new Date(due_date + 'T00:00:00Z').toISOString().slice(0, 10) === due_date;
+    if (!valid || due_date < todayStr) throw new HttpError(400, 'Enter a valid due date that is not in the past.');
+  }
   await tx(async (conn) => {
     const doc = await getDoc(conn, req.params.id);
     if (!['Registered', 'Returned', 'Received'].includes(doc.status))
@@ -522,12 +726,20 @@ app.post('/api/documents/:id/route', auth(), h(async (req, res) => {
     if (dest.id === req.user.department_id)
       throw new HttpError(400, 'You cannot route a document to your own department.');
 
+    // the assigned receiver must be active and belong to the destination department
+    const [[rcv]] = await conn.query(
+      `SELECT rc.id, CONCAT(e.employee_no, ' - ', e.full_name) name
+       FROM receivers rc JOIN employees e ON e.id = rc.employee_id
+       WHERE rc.id=? AND rc.department_id=? AND rc.is_active=1 AND e.is_active=1`, [receiver_id || 0, dest.id]);
+    if (!rcv) throw new HttpError(400, 'Choose an active receiver that belongs to the destination department.');
+
     await conn.query(
-      `INSERT INTO routing (document_id, from_dept_id, to_dept_id, purpose, instructions, routed_by)
-       VALUES (?,?,?,?,?,?)`,
-      [doc.id, req.user.department_id, dest.id, purpose || null, instructions || null, req.user.id]);
+      `INSERT INTO routing (document_id, from_dept_id, to_dept_id, receiver_id, purpose, instructions, due_date, routed_by)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      [doc.id, req.user.department_id, dest.id, rcv.id, purpose || null, instructions || null, due_date || null, req.user.id]);
     await conn.query("UPDATE documents SET status='Routed' WHERE id=?", [doc.id]);
-    await track(conn, doc.id, 'Routed', `Routed to ${dest.name}` + (purpose ? ` (${purpose})` : ''), req.user.id);
+    await track(conn, doc.id, 'Routed',
+      `Routed to ${dest.name}, assigned to ${rcv.name}` + (purpose ? ` (${purpose})` : ''), req.user.id);
   });
   res.json({ ok: true });
 }));
@@ -535,7 +747,8 @@ app.post('/api/documents/:id/route', auth(), h(async (req, res) => {
 // receive or return a routed document
 async function respondToRouting(req, res, action) {
   const remarks = (req.body.remarks || '').trim();
-  if (action === 'Returned' && !remarks) throw new HttpError(400, 'Remarks are required when returning a document.');
+  if (['Returned', 'Rejected'].includes(action) && !remarks)
+    throw new HttpError(400, `Remarks are required when ${action === 'Returned' ? 'returning' : 'rejecting'} a document.`);
   await tx(async (conn) => {
     const [[r]] = await conn.query('SELECT * FROM routing WHERE id=? FOR UPDATE', [req.params.id]);
     if (!r) throw new HttpError(404, 'Routing record not found.');
@@ -552,6 +765,7 @@ async function respondToRouting(req, res, action) {
 }
 app.post('/api/routing/:id/receive', auth(), h((req, res) => respondToRouting(req, res, 'Received')));
 app.post('/api/routing/:id/return', auth(), h((req, res) => respondToRouting(req, res, 'Returned')));
+app.post('/api/routing/:id/reject', auth(), h((req, res) => respondToRouting(req, res, 'Rejected')));
 
 // approve or reject
 app.post('/api/documents/:id/approve', auth(['admin', 'approver']), h(async (req, res) => {
@@ -593,7 +807,8 @@ app.post('/api/documents/:id/release', auth(['admin', 'clerk']), h(async (req, r
 const overdueSql = `FROM routing r
   JOIN documents d ON d.id = r.document_id
   JOIN departments t ON t.id = r.to_dept_id
-  WHERE r.status = 'Pending' AND r.routed_at < NOW() - INTERVAL ${OVERDUE_DAYS} DAY`;
+  WHERE r.status = 'Pending'
+    AND (r.routed_at < NOW() - INTERVAL ${OVERDUE_DAYS} DAY OR r.due_date < CURDATE())`;
 
 app.get('/api/overdue', auth(), h(async (req, res) => {
   const [rows] = await pool.query(

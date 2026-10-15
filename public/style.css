@@ -101,3 +101,7 @@ td.empty { text-align: center; color: var(--muted); padding: 1.5rem; }
 .tabs button.active { border-bottom-color: var(--brand); color: var(--brand); font-weight: 600; }
 .btn-row { display: flex; gap: .6rem; flex-wrap: wrap; }
 td .ghost { padding: .3rem .6rem; margin: 0 .15rem .15rem 0; font-size: .85rem; }
+
+/* routing status, inbox */
+.badge.Pending { background: #fff1cc; color: #7a5600; }
+.late { color: var(--danger); font-weight: 600; }

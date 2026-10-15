@@ -29,6 +29,7 @@
     <nav id="nav">
       <button data-page="dashboard">Dashboard</button>
       <button data-page="documents">Documents</button>
+      <button data-page="inbox">Inbox</button>
       <button data-page="register" data-roles="admin,clerk">Register document</button>
       <button data-page="overdue">Overdue</button>
       <button data-page="departments">Departments</button>
@@ -67,6 +68,7 @@
           <label>Title <input id="r-title" required></label>
           <label>Type <select id="r-type" required></select></label>
           <label>Origin department <select id="r-dept" required></select></label>
+          <label>Sender <select id="r-sender" required></select></label>
           <label>Description <textarea id="r-desc" rows="3"></textarea></label>
           <button type="submit">Register</button>
           <p class="muted">The document number is generated automatically.</p>
@@ -180,6 +182,27 @@
         <table>
           <thead><tr><th>Document type</th><th>Documents</th><th></th></tr></thead>
           <tbody id="dt-rows"></tbody>
+        </table>
+      </section>
+
+      <section id="page-inbox" hidden>
+        <p id="inbox-note" class="muted"></p>
+        <div class="toolbar">
+          <input id="inbox-search" placeholder="Search by number or title">
+          <select id="inbox-status">
+            <option value="">All statuses</option>
+            <option>Pending</option><option>Received</option><option>Returned</option><option>Rejected</option>
+          </select>
+          <select id="inbox-sort">
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="due">Due date</option>
+            <option value="title">Title (A-Z)</option>
+          </select>
+        </div>
+        <table>
+          <thead><tr><th>Number</th><th>Title</th><th>Type</th><th>From</th><th>Assigned to</th><th>Due</th><th>Routed</th><th>Status</th></tr></thead>
+          <tbody id="inbox-rows"></tbody>
         </table>
       </section>
     </main>

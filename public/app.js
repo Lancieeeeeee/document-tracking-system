@@ -73,6 +73,7 @@ async function startApp() {
   });
   fillSelect('#r-type', lookups.types);
   fillSelect('#r-dept', lookups.departments.filter((d) => d.is_active));
+  fillSelect('#r-sender', lookups.senders);
   showPage('dashboard');
 }
 
@@ -88,7 +89,7 @@ function showPage(page) {
   currentPage = page;
   document.querySelectorAll('main > section').forEach((s) => (s.hidden = s.id !== 'page-' + page));
   document.querySelectorAll('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
-  ({ dashboard: loadDashboard, documents: loadDocuments, overdue: loadOverdue, departments: loadDepartments, people: loadPeople, users: loadUsers, register: loadRegister, doctypes: loadDocTypes }[page] || (() => {}))();
+  ({ dashboard: loadDashboard, documents: loadDocuments, overdue: loadOverdue, departments: loadDepartments, people: loadPeople, users: loadUsers, register: loadRegister, doctypes: loadDocTypes, inbox: loadInbox }[page] || (() => {}))();
 }
 
 // ---------- dashboard ----------
@@ -140,6 +141,7 @@ $('#register-form').addEventListener('submit', async (e) => {
       description: $('#r-desc').value,
       type_id: $('#r-type').value,
       origin_dept_id: $('#r-dept').value,
+      sender_id: $('#r-sender').value,
     });
     toast(`Registered as ${r.doc_number}`);
     e.target.reset();
@@ -150,7 +152,7 @@ $('#register-form').addEventListener('submit', async (e) => {
 // ---------- overdue ----------
 async function loadOverdue() {
   const { days, rows } = await api('/overdue');
-  $('#overdue-note').textContent = `Routed documents not received within ${days} days.`;
+  $('#overdue-note').textContent = `Routed documents not received within ${days} days, or past their due date.`;
   $('#overdue-rows').innerHTML = rows.length
     ? rows.map((r) => `<tr class="click" data-id="${r.id}"><td>${esc(r.doc_number)}</td><td>${esc(r.title)}</td>
         <td>${esc(r.to_name)}</td><td>${fmt(r.routed_at)}</td><td>${r.days_pending}</td></tr>`).join('')
@@ -211,17 +213,31 @@ function routeForm(label) {
   const opts = lookups.departments
     .filter((d) => d.is_active && d.id !== user.department_id)
     .map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+  const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
   return `<div class="action-box"><h3>${label}</h3>
     <label>Send to <select id="f-dept">${opts}</select></label>
+    <label>Assigned receiver <select id="f-receiver"></select></label>
+    <label>Due date (optional) <input id="f-due" type="date" min="${today}"></label>
     <label>Purpose <input id="f-purpose" placeholder="e.g. For review"></label>
     <label>Instructions <textarea id="f-instr" rows="2"></textarea></label>
     <button data-action="route">Route document</button></div>`;
 }
 
+// show only the active receivers of the chosen department
+function refreshReceivers() {
+  const sel = $('#f-receiver');
+  const dept = $('#f-dept');
+  if (!sel || !dept) return;
+  const list = lookups.receivers.filter((r) => r.department_id == dept.value);
+  sel.innerHTML = list.length
+    ? list.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join('')
+    : '<option value="">No active receiver in this department</option>';
+}
+
 async function openDoc(id) {
   let data;
-  try { data = await api('/documents/' + id); } catch (err) { return toast(err.message, true); }
-  const { doc, routing, approvals, releases, history } = data;
+  try { lookups = await api('/lookups'); data = await api('/documents/' + id); } catch (err) { return toast(err.message, true); }
+  const { doc, routing, approvals, releases, files, history } = data;
   const pending = routing.find((r) => r.status === 'Pending');
   const last = routing[routing.length - 1];
   const isAdmin = user.role === 'admin';
@@ -231,10 +247,11 @@ async function openDoc(id) {
   if (['Registered', 'Returned'].includes(doc.status) && isClerk) actions += routeForm('Route this document');
   if (doc.status === 'Routed' && pending && (isAdmin || user.department_id === pending.to_dept_id)) {
     actions += `<div class="action-box"><h3>Receive this document</h3>
-      <label>Remarks <textarea id="f-remarks" rows="2" placeholder="Required when returning"></textarea></label>
+      <label>Remarks <textarea id="f-remarks" rows="2" placeholder="Required when returning or rejecting"></textarea></label>
       <div class="btn-row">
         <button data-action="receive" data-rid="${pending.id}">Receive</button>
         <button class="danger" data-action="return" data-rid="${pending.id}">Return to sender</button>
+        <button class="danger" data-action="reject-routing" data-rid="${pending.id}">Reject</button>
       </div></div>`;
   }
   if (doc.status === 'Received') {
@@ -255,11 +272,31 @@ async function openDoc(id) {
       <button data-action="release">Release document</button></div>`;
   }
 
+  const FILE_ACCEPT = '.pdf,.docx,.xlsx,.png,.jpg,.jpeg,.gif,.webp';
+  const canFiles = ['admin', 'clerk', 'sender'].includes(user.role) && doc.status !== 'Released';
+  const fileRows = files.length ? files.map((f) => `<tr>
+      <td>${esc(f.original_name)}</td><td>${fmtSize(f.file_size)}</td>
+      <td>${esc(f.uploaded_by_name)}<br><small>${fmt(f.uploaded_at)}</small></td>
+      <td><button class="ghost" data-action="file-download" data-fid="${f.id}" data-name="${esc(f.original_name)}">Download</button>
+        ${canFiles && (user.role !== 'sender' || f.uploaded_by === user.id)
+          ? `<button class="ghost" data-action="file-replace" data-fid="${f.id}">Replace</button>
+             <button class="ghost" data-action="file-delete" data-fid="${f.id}">Delete</button>` : ''}</td></tr>`).join('')
+    : '<tr><td class="empty" colspan="4">No files attached.</td></tr>';
+  const filesHtml = `<h3 style="margin-top:1rem">Attachments</h3>
+    <table><thead><tr><th>File</th><th>Size</th><th>Uploaded</th><th></th></tr></thead><tbody>${fileRows}</tbody></table>
+    ${canFiles ? `<div class="action-box">
+        <label>Attach a file (PDF, DOCX, XLSX or image, max 5 MB)
+          <input type="file" id="upload-input" accept="${FILE_ACCEPT}"></label>
+        <button data-action="upload">Upload</button>
+        <input type="file" id="replace-input" accept="${FILE_ACCEPT}" hidden>
+      </div>` : ''}`;
+
   const routingRows = routing.length
     ? routing.map((r) => `<tr><td>${esc(r.from_name)} &rarr; ${esc(r.to_name)}</td><td>${esc(r.purpose || '')}</td>
+        <td>${esc(r.receiver_name || '-')}</td><td>${esc(r.due_date || '-')}</td>
         <td>${badge(r.status)}</td><td>${r.received_by_name ? esc(r.received_by_name) + '<br><small>' + fmt(r.received_at) + '</small>' : ''}</td>
         <td>${esc(r.remarks || '')}</td></tr>`).join('')
-    : '<tr><td class="empty" colspan="5">Not routed yet.</td></tr>';
+    : '<tr><td class="empty" colspan="7">Not routed yet.</td></tr>';
 
   $('#modal-body').dataset.id = doc.id;
   $('#modal-body').innerHTML = `
@@ -268,13 +305,15 @@ async function openDoc(id) {
     <dl class="meta">
       <div><dt>Type</dt><dd>${esc(doc.type_name)}</dd></div>
       <div><dt>Origin</dt><dd>${esc(doc.origin_name)}</dd></div>
+      <div><dt>Sender</dt><dd>${esc(doc.sender_name || '-')}</dd></div>
       <div><dt>Registered by</dt><dd>${esc(doc.created_by_name)}</dd></div>
       <div><dt>Registered on</dt><dd>${fmt(doc.created_at)}</dd></div>
     </dl>
     ${doc.description ? `<p>${esc(doc.description)}</p>` : ''}
     ${actions}
-    <h3>Routing</h3>
-    <table><thead><tr><th>Route</th><th>Purpose</th><th>Status</th><th>Handled by</th><th>Remarks</th></tr></thead>
+    ${filesHtml}
+    <h3 style="margin-top:1rem">Routing</h3>
+    <table><thead><tr><th>Route</th><th>Purpose</th><th>Assigned to</th><th>Due</th><th>Status</th><th>Handled by</th><th>Remarks</th></tr></thead>
       <tbody>${routingRows}</tbody></table>
     ${approvals.length ? `<h3 style="margin-top:1rem">Approvals</h3><table><thead><tr><th>Approver</th><th>Decision</th><th>Comments</th><th>Date</th></tr></thead><tbody>
       ${approvals.map((a) => `<tr><td>${esc(a.approver_name)}</td><td>${badge(a.decision)}</td><td>${esc(a.comments || '')}</td><td>${fmt(a.decided_at)}</td></tr>`).join('')}</tbody></table>` : ''}
@@ -284,7 +323,54 @@ async function openDoc(id) {
     <ul class="timeline">${history.map((h) => `<li><b>${esc(h.action)}</b> &ndash; ${esc(h.details || '')}
       <small>${esc(h.user_name)}, ${fmt(h.created_at)}</small></li>`).join('')}</ul>`;
   $('#modal').hidden = false;
+  refreshReceivers();
 }
+
+// ---------- file helpers ----------
+let replaceId = null;
+const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
+
+async function sendFile(url, method, file) {
+  if (file.size > 5 * 1024 * 1024) throw new Error('File is too large. The maximum size is 5 MB.');
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch('/api' + url, { method, headers: { Authorization: 'Bearer ' + token }, body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) clearSession();
+  if (!res.ok) throw new Error(data.error || 'Upload failed.');
+  return data;
+}
+
+async function downloadFile(id, name) {
+  const res = await fetch(`/api/files/${id}/download`, { headers: { Authorization: 'Bearer ' + token } });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error(d.error || 'Download failed.');
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+// choosing a file for "Replace"
+$('#modal-body').addEventListener('change', async (e) => {
+  if (e.target.id === 'f-dept') return refreshReceivers();
+  if (e.target.id !== 'replace-input' || !e.target.files[0]) return;
+  const id = $('#modal-body').dataset.id;
+  try {
+    await sendFile(`/files/${replaceId}`, 'PUT', e.target.files[0]);
+    toast('File replaced.');
+    await openDoc(id);
+  } catch (err) {
+    e.target.value = '';
+    toast(err.message, true);
+  }
+});
 
 // buttons inside the profile
 $('#modal-body').addEventListener('click', async (e) => {
@@ -293,9 +379,21 @@ $('#modal-body').addEventListener('click', async (e) => {
   const id = $('#modal-body').dataset.id;
   const v = (n) => ($('#f-' + n) || {}).value || '';
   try {
-    if (action === 'route') await api(`/documents/${id}/route`, 'POST', { to_dept_id: v('dept'), purpose: v('purpose'), instructions: v('instr') });
+    if (action === 'file-download') return await downloadFile(e.target.dataset.fid, e.target.dataset.name);
+    if (action === 'file-replace') { replaceId = e.target.dataset.fid; $('#replace-input').click(); return; }
+    if (action === 'file-delete') {
+      if (!confirm('Delete this file?')) return;
+      await api(`/files/${e.target.dataset.fid}`, 'DELETE');
+    }
+    if (action === 'upload') {
+      const f = ($('#upload-input').files || [])[0];
+      if (!f) throw new Error('Choose a file first.');
+      await sendFile(`/documents/${id}/files`, 'POST', f);
+    }
+    if (action === 'route') await api(`/documents/${id}/route`, 'POST', { to_dept_id: v('dept'), receiver_id: v('receiver'), due_date: v('due'), purpose: v('purpose'), instructions: v('instr') });
     if (action === 'receive') await api(`/routing/${e.target.dataset.rid}/receive`, 'POST', { remarks: v('remarks') });
     if (action === 'return') await api(`/routing/${e.target.dataset.rid}/return`, 'POST', { remarks: v('remarks') });
+    if (action === 'reject-routing') await api(`/routing/${e.target.dataset.rid}/reject`, 'POST', { remarks: v('remarks') });
     if (action === 'approve') await api(`/documents/${id}/approve`, 'POST', { decision: 'Approved', comments: v('comments') });
     if (action === 'reject') await api(`/documents/${id}/approve`, 'POST', { decision: 'Rejected', comments: v('comments') });
     if (action === 'release') await api(`/documents/${id}/release`, 'POST', { released_to: v('to'), remarks: v('rel-remarks') });
@@ -553,6 +651,7 @@ async function loadRegister() {
   lookups = await api('/lookups');
   fillSelect('#r-type', lookups.types);
   fillSelect('#r-dept', lookups.departments.filter((d) => d.is_active));
+  fillSelect('#r-sender', lookups.senders);
 }
 
 // ---------- document types ----------
@@ -613,6 +712,31 @@ $('#dt-rows').addEventListener('click', async (e) => {
       loadDocTypes();
     }
   } catch (err) { toast(err.message, true); }
+});
+
+// ---------- inbox ----------
+async function loadInbox() {
+  const q = encodeURIComponent($('#inbox-search').value);
+  const s = encodeURIComponent($('#inbox-status').value);
+  const o = encodeURIComponent($('#inbox-sort').value);
+  const rows = await api(`/inbox?q=${q}&status=${s}&sort=${o}`);
+  $('#inbox-note').textContent = user.role === 'admin'
+    ? 'Showing documents routed to every department.'
+    : `Documents routed to ${user.dept_name}.`;
+  $('#inbox-rows').innerHTML = rows.length
+    ? rows.map((r) => `<tr class="click" data-id="${r.doc_id}">
+        <td>${esc(r.doc_number)}</td><td>${esc(r.title)}</td><td>${esc(r.type_name)}</td><td>${esc(r.from_name)}</td>
+        <td>${esc(r.receiver_name || '-')}</td>
+        <td class="${r.overdue ? 'late' : ''}">${esc(r.due_date || '-')}${r.overdue ? ' (overdue)' : ''}</td>
+        <td>${fmt(r.routed_at)}</td><td>${badge(r.status)}</td></tr>`).join('')
+    : '<tr><td class="empty" colspan="8">Your inbox is empty.</td></tr>';
+}
+$('#inbox-search').addEventListener('input', loadInbox);
+$('#inbox-status').addEventListener('change', loadInbox);
+$('#inbox-sort').addEventListener('change', loadInbox);
+$('#inbox-rows').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-id]');
+  if (tr) openDoc(tr.dataset.id);
 });
 
 // ---------- init ----------
