@@ -1,4 +1,4 @@
-require('dotenv').config();
+                                                                                                                                      require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
@@ -829,9 +829,14 @@ app.get('/api/dashboard', auth(), h(async (req, res) => {
 
 // ---------- start ----------
 const PORT = process.env.PORT || 3000;
-seedUsers()
-  .then(() => app.listen(PORT, () => console.log(`DTS running at http://localhost:${PORT}`)))
-  .catch((e) => {
-    console.error('Could not start. Check your .env database settings and that schema.sql was run.\n', e.message);
-    process.exit(1);
-  });
+
+if (process.env.NODE_ENV !== 'production') {
+  seedUsers()
+    .then(() => app.listen(PORT, () => console.log(`DTS running at http://localhost:${PORT}`)))
+    .catch((e) => {
+      console.error('Could not start. Check your .env database settings and that schema.sql was run.\n', e.message);
+      process.exit(1);
+    });
+}
+
+module.exports = app;
