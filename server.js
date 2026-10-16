@@ -441,8 +441,15 @@ app.delete('/api/document-types/:id', auth(manage), h(async (req, res) => {
 }));
 
 // ---------- file uploads ----------
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const UPLOAD_DIR = process.env.NODE_ENV === 'production' 
+  ? path.join('/tmp', 'uploads') 
+  : path.join(__dirname, 'uploads');
+
+try {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+} catch (err) {
+  console.error('Could not create upload directory:', err.message);
+}
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
 const FILE_TYPES = {
   '.pdf': ['application/pdf'],
