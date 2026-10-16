@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DTS - Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <h2>DTS System</h2>
+            <nav>
+                <a href="dashboard.html" class="active">Dashboard</a>
+                <a href="documents.html">Documents</a>
+                <a href="index.html">Logout</a>
+            </nav>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header>
+                <h1>Dashboard Overview</h1>
+            </header>
+            
+            <section class="kpi-container">
+                <div class="kpi-card">
+                    <h3>Total Documents</h3>
+                    <p id="kpi-total">0</p>
+                </div>
+                <div class="kpi-card">
+                    <h3>Pending</h3>
+                    <p id="kpi-pending">0</p>
+                </div>
+                <div class="kpi-card">
+                    <h3>Completed</h3>
+                    <p id="kpi-completed">0</p>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

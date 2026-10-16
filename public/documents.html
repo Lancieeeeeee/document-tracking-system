@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DTS - Documents</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <h2>DTS System</h2>
+            <nav>
+                <a href="dashboard.html">Dashboard</a>
+                <a href="documents.html" class="active">Documents</a>
+                <a href="index.html">Logout</a>
+            </nav>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header>
+                <h1>Document Management</h1>
+            </header>
+            
+            <section class="content-card">
+                <h2>List of Documents</h2>
+                <table class="doc-table">
+                    <thead>
+                        <tr>
+                            <th>Tracking No.</th>
+                            <th>Document Title</th>
+                            <th>Type</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="document-list">
+                        <!-- Dynamic rows will be loaded here via app.js -->
+                    </tbody>
+                </table>
+            </section>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
