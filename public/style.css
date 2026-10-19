@@ -105,3 +105,15 @@ td .ghost { padding: .3rem .6rem; margin: 0 .15rem .15rem 0; font-size: .85rem; 
 /* routing status, inbox */
 .badge.Pending { background: #fff1cc; color: #7a5600; }
 .late { color: var(--danger); font-weight: 600; }
+
+/* acknowledgment receipt (WP14) */
+.receipt-modal { z-index: 15; }
+.ack-no { font-weight: 700; letter-spacing: .05em; margin: 0 0 .8rem; }
+.receipt-table th { width: 38%; text-align: left; background: #f4f6f8; }
+.sign-line { margin-top: 3rem; border-top: 1px solid var(--ink); width: 16rem; padding-top: .3rem; font-size: .85rem; color: var(--muted); }
+@media print {
+  body > *:not(#receipt-modal) { display: none !important; }
+  #receipt-modal { position: static; background: none; padding: 0; overflow: visible; }
+  #receipt-modal .modal-box { max-width: none; padding: 0; }
+  .no-print { display: none !important; }
+}

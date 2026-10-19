@@ -1,4 +1,4 @@
-                                                                                                                                      require('dotenv').config();
+require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
@@ -13,13 +13,19 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+const isVercel = !!process.env.VERCEL;
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
+  port: Number(process.env.DB_PORT) || 3306,
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'dts_db',
   waitForConnections: true,
-  connectionLimit: 10,
+  connectionLimit: isVercel ? 3 : 10,
+  // cloud databases (Aiven, TiDB, ...) need an encrypted connection: set DB_SSL=true
+  ssl: process.env.DB_SSL === 'true'
+    ? (process.env.DB_CA ? { ca: process.env.DB_CA } : { rejectUnauthorized: false })
+    : undefined,
 });
 
 // ---------- helpers ----------
@@ -60,20 +66,55 @@ async function getDoc(conn, id) {
   return doc;
 }
 
-// ---------- login sessions (kept in memory) ----------
-const sessions = new Map();
+// ---------- login sessions (kept in the database so they survive on Vercel) ----------
+const SESSION_DAYS = 7;
+const tokenOf = (req) => (req.headers.authorization || '').replace('Bearer ', '');
 
 function auth(roles = []) {
-  return (req, res, next) => {
-    const token = (req.headers.authorization || '').replace('Bearer ', '');
-    const user = sessions.get(token);
-    if (!user) return res.status(401).json({ error: 'Please log in.' });
-    if (roles.length && !roles.includes(user.role))
-      return res.status(403).json({ error: 'You are not allowed to do this.' });
-    req.user = user;
-    next();
+  return async (req, res, next) => {
+    try {
+      const [[row]] = await pool.query(
+        `SELECT user_json FROM sessions WHERE token=? AND created_at > NOW() - INTERVAL ${SESSION_DAYS} DAY`,
+        [tokenOf(req)]);
+      if (!row) return res.status(401).json({ error: 'Please log in.' });
+      const user = JSON.parse(row.user_json);
+      if (roles.length && !roles.includes(user.role))
+        return res.status(403).json({ error: 'You are not allowed to do this.' });
+      req.user = user;
+      next();
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'Server error: ' + e.message });
+    }
   };
 }
+
+// creates the extra tables/columns this version needs (safe to run many times)
+async function ensureSchema() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS sessions (
+    token VARCHAR(64) PRIMARY KEY,
+    user_id INT NOT NULL,
+    user_json VARCHAR(500) NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_sessions_user (user_id)
+  )`);
+  const [[{ c }]] = await pool.query(
+    `SELECT COUNT(*) c FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'files' AND COLUMN_NAME = 'file_data'`);
+  if (!Number(c)) await pool.query('ALTER TABLE files ADD COLUMN file_data LONGBLOB NULL');
+}
+
+let readyPromise;
+function ready() {
+  if (!readyPromise)
+    readyPromise = ensureSchema().then(seedUsers).catch((e) => { readyPromise = null; throw e; });
+  return readyPromise;
+}
+app.use('/api', (req, res, next) =>
+  ready().then(() => next()).catch((e) => {
+    console.error(e);
+    res.status(500).json({ error: 'Database error: ' + e.message });
+  }));
 
 async function seedUsers() {
   const [[{ c }]] = await pool.query('SELECT COUNT(*) c FROM users');
@@ -107,12 +148,13 @@ app.post('/api/login', h(async (req, res) => {
     throw new HttpError(401, 'Invalid username or password.');
   const token = crypto.randomBytes(24).toString('hex');
   const user = { id: u.id, name: u.full_name, role: u.role, department_id: u.department_id, dept_name: u.dept_name };
-  sessions.set(token, user);
+  await pool.query(`DELETE FROM sessions WHERE created_at < NOW() - INTERVAL ${SESSION_DAYS} DAY`);
+  await pool.query('INSERT INTO sessions (token, user_id, user_json) VALUES (?,?,?)', [token, user.id, JSON.stringify(user)]);
   res.json({ token, user });
 }));
 
 app.post('/api/logout', auth(), h(async (req, res) => {
-  sessions.delete((req.headers.authorization || '').replace('Bearer ', ''));
+  await pool.query('DELETE FROM sessions WHERE token=?', [tokenOf(req)]);
   res.json({ ok: true });
 }));
 
@@ -308,7 +350,7 @@ app.delete('/api/receivers/:id', auth(manage), h(async (req, res) => {
 const ROLES = ['admin', 'clerk', 'sender', 'receiver', 'approver', 'office_staff'];
 
 function dropSessions(userId) {
-  for (const [t, u] of sessions) if (u.id === Number(userId)) sessions.delete(t);
+  return pool.query('DELETE FROM sessions WHERE user_id=?', [Number(userId)]);
 }
 
 function checkPassword(pw) {
@@ -359,7 +401,7 @@ app.put('/api/users/:id', auth(['admin']), h(async (req, res) => {
     req.user.department_id = dept.id;
     req.user.dept_name = dept.name;
   } else {
-    dropSessions(req.params.id); // they log in again to get the new role
+    await dropSessions(req.params.id); // they log in again to get the new role
   }
   res.json({ ok: true });
 }));
@@ -367,7 +409,7 @@ app.put('/api/users/:id', auth(['admin']), h(async (req, res) => {
 app.put('/api/users/:id/toggle', auth(['admin']), h(async (req, res) => {
   if (Number(req.params.id) === req.user.id) throw new HttpError(400, 'You cannot deactivate your own account.');
   await pool.query('UPDATE users SET is_active = 1 - is_active WHERE id=?', [req.params.id]);
-  dropSessions(req.params.id);
+  await dropSessions(req.params.id);
   res.json({ ok: true });
 }));
 
@@ -375,7 +417,7 @@ app.put('/api/users/:id/password', auth(['admin']), h(async (req, res) => {
   checkPassword(req.body.new_password);
   await pool.query('UPDATE users SET password_hash=? WHERE id=?',
     [await bcrypt.hash(req.body.new_password, 10), req.params.id]);
-  if (Number(req.params.id) !== req.user.id) dropSessions(req.params.id);
+  if (Number(req.params.id) !== req.user.id) await dropSessions(req.params.id);
   res.json({ ok: true });
 }));
 
@@ -388,7 +430,7 @@ app.delete('/api/users/:id', auth(['admin']), h(async (req, res) => {
       throw new HttpError(400, 'This user has records (documents, routing, etc.) and cannot be deleted. Deactivate the account instead.');
     throw e;
   }
-  dropSessions(req.params.id);
+  await dropSessions(req.params.id);
   res.json({ ok: true });
 }));
 
@@ -440,17 +482,10 @@ app.delete('/api/document-types/:id', auth(manage), h(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// ---------- file uploads ----------
-const UPLOAD_DIR = process.env.NODE_ENV === 'production' 
-  ? path.join('/tmp', 'uploads') 
-  : path.join(__dirname, 'uploads');
-
-try {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-} catch (err) {
-  console.error('Could not create upload directory:', err.message);
-}
-const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
+// ---------- file uploads (stored inside the database, so they also work on Vercel) ----------
+const UPLOAD_DIR = path.join(__dirname, 'uploads'); // only used to read files uploaded before this update
+const MAX_FILE_MB = isVercel ? 4 : 5; // Vercel allows a request of about 4.5 MB at most
+const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 const FILE_TYPES = {
   '.pdf': ['application/pdf'],
   '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
@@ -465,12 +500,7 @@ const TYPE_MESSAGE = 'Only PDF, DOCX, XLSX and image files (PNG, JPG, GIF, WEBP)
 const fileRoles = ['admin', 'clerk', 'sender'];
 
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: UPLOAD_DIR,
-    // stored under a unique name; the original name is kept in the database
-    filename: (req, file, cb) =>
-      cb(null, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}${path.extname(file.originalname).toLowerCase()}`),
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: MAX_FILE_BYTES, files: 1 },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
@@ -479,13 +509,16 @@ const upload = multer({
   },
 });
 
-const removeFile = (name) => fs.unlink(path.join(UPLOAD_DIR, name), () => {});
+// files uploaded before this update still live in the uploads folder (local use only)
+const removeFile = (name) => {
+  if (name && !name.startsWith('db-')) fs.unlink(path.join(UPLOAD_DIR, name), () => {});
+};
 
 function receiveFile(req, res) {
   return new Promise((resolve, reject) => {
     upload.single('file')(req, res, (err) => {
       if (err) {
-        if (err.code === 'LIMIT_FILE_SIZE') return reject(new HttpError(400, 'File is too large. The maximum size is 5 MB.'));
+        if (err.code === 'LIMIT_FILE_SIZE') return reject(new HttpError(400, `File is too large. The maximum size is ${MAX_FILE_MB} MB.`));
         if (err instanceof HttpError) return reject(err);
         return reject(new HttpError(400, 'Upload failed: ' + err.message));
       }
@@ -498,10 +531,7 @@ function receiveFile(req, res) {
 // the first bytes of the file must match the type it claims to be
 function verifySignature(file) {
   const ext = path.extname(file.originalname).toLowerCase();
-  const buf = Buffer.alloc(12);
-  const fd = fs.openSync(file.path, 'r');
-  fs.readSync(fd, buf, 0, 12, 0);
-  fs.closeSync(fd);
+  const buf = file.buffer.subarray(0, 12);
   const head = buf.toString('latin1');
   let ok = false;
   if (ext === '.pdf') ok = head.startsWith('%PDF');
@@ -510,58 +540,48 @@ function verifySignature(file) {
   else if (ext === '.jpg' || ext === '.jpeg') ok = buf[0] === 0xff && buf[1] === 0xd8;
   else if (ext === '.gif') ok = head.startsWith('GIF8');
   else if (ext === '.webp') ok = head.slice(0, 4) === 'RIFF' && head.slice(8, 12) === 'WEBP';
-  if (!ok) {
-    removeFile(file.filename);
-    throw new HttpError(400, 'The file content does not match its type.');
-  }
+  if (!ok) throw new HttpError(400, 'The file content does not match its type.');
 }
 
 const originalName = (file) => Buffer.from(file.originalname, 'latin1').toString('utf8').slice(0, 255);
+const storedName = (file) =>
+  `db-${Date.now()}-${crypto.randomBytes(4).toString('hex')}${path.extname(file.originalname).toLowerCase()}`;
 
 app.post('/api/documents/:id/files', auth(fileRoles), h(async (req, res) => {
   const file = await receiveFile(req, res);
-  try {
-    verifySignature(file);
-    const name = originalName(file);
-    await tx(async (conn) => {
-      const doc = await getDoc(conn, req.params.id);
-      if (doc.status === 'Released') throw new HttpError(400, 'Files cannot be changed after the document is released.');
-      await conn.query(
-        `INSERT INTO files (document_id, original_name, stored_name, file_type, file_size, uploaded_by)
-         VALUES (?,?,?,?,?,?)`,
-        [doc.id, name, file.filename, file.mimetype, file.size, req.user.id]);
-      await track(conn, doc.id, 'File uploaded', name, req.user.id);
-    });
-  } catch (e) {
-    removeFile(file.filename);
-    throw e;
-  }
+  verifySignature(file);
+  const name = originalName(file);
+  await tx(async (conn) => {
+    const doc = await getDoc(conn, req.params.id);
+    if (doc.status === 'Released') throw new HttpError(400, 'Files cannot be changed after the document is released.');
+    await conn.query(
+      `INSERT INTO files (document_id, original_name, stored_name, file_type, file_size, file_data, uploaded_by)
+       VALUES (?,?,?,?,?,?,?)`,
+      [doc.id, name, storedName(file), file.mimetype, file.size, file.buffer, req.user.id]);
+    await track(conn, doc.id, 'File uploaded', name, req.user.id);
+  });
   res.json({ ok: true });
 }));
 
 app.put('/api/files/:id', auth(fileRoles), h(async (req, res) => {
   const file = await receiveFile(req, res);
+  verifySignature(file);
+  const name = originalName(file);
   let oldStored;
-  try {
-    verifySignature(file);
-    const name = originalName(file);
-    await tx(async (conn) => {
-      const [[f]] = await conn.query(
-        `SELECT f.*, d.status FROM files f JOIN documents d ON d.id = f.document_id WHERE f.id=? FOR UPDATE`, [req.params.id]);
-      if (!f) throw new HttpError(404, 'File not found.');
-      if (f.status === 'Released') throw new HttpError(400, 'Files cannot be changed after the document is released.');
-      if (req.user.role === 'sender' && f.uploaded_by !== req.user.id)
-        throw new HttpError(403, 'You can only replace files you uploaded.');
-      await conn.query(
-        `UPDATE files SET original_name=?, stored_name=?, file_type=?, file_size=?, uploaded_by=?, uploaded_at=NOW() WHERE id=?`,
-        [name, file.filename, file.mimetype, file.size, req.user.id, f.id]);
-      await track(conn, f.document_id, 'File replaced', `${f.original_name} -> ${name}`, req.user.id);
-      oldStored = f.stored_name;
-    });
-  } catch (e) {
-    removeFile(file.filename);
-    throw e;
-  }
+  await tx(async (conn) => {
+    const [[f]] = await conn.query(
+      `SELECT f.id, f.document_id, f.original_name, f.stored_name, f.uploaded_by, d.status
+       FROM files f JOIN documents d ON d.id = f.document_id WHERE f.id=? FOR UPDATE`, [req.params.id]);
+    if (!f) throw new HttpError(404, 'File not found.');
+    if (f.status === 'Released') throw new HttpError(400, 'Files cannot be changed after the document is released.');
+    if (req.user.role === 'sender' && f.uploaded_by !== req.user.id)
+      throw new HttpError(403, 'You can only replace files you uploaded.');
+    await conn.query(
+      `UPDATE files SET original_name=?, stored_name=?, file_type=?, file_size=?, file_data=?, uploaded_by=?, uploaded_at=NOW() WHERE id=?`,
+      [name, storedName(file), file.mimetype, file.size, file.buffer, req.user.id, f.id]);
+    await track(conn, f.document_id, 'File replaced', `${f.original_name} -> ${name}`, req.user.id);
+    oldStored = f.stored_name;
+  });
   removeFile(oldStored);
   res.json({ ok: true });
 }));
@@ -570,7 +590,8 @@ app.delete('/api/files/:id', auth(fileRoles), h(async (req, res) => {
   let stored;
   await tx(async (conn) => {
     const [[f]] = await conn.query(
-      `SELECT f.*, d.status FROM files f JOIN documents d ON d.id = f.document_id WHERE f.id=? FOR UPDATE`, [req.params.id]);
+      `SELECT f.id, f.document_id, f.original_name, f.stored_name, f.uploaded_by, d.status
+       FROM files f JOIN documents d ON d.id = f.document_id WHERE f.id=? FOR UPDATE`, [req.params.id]);
     if (!f) throw new HttpError(404, 'File not found.');
     if (f.status === 'Released') throw new HttpError(400, 'Files cannot be changed after the document is released.');
     if (req.user.role === 'sender' && f.uploaded_by !== req.user.id)
@@ -586,6 +607,11 @@ app.delete('/api/files/:id', auth(fileRoles), h(async (req, res) => {
 app.get('/api/files/:id/download', auth(), h(async (req, res) => {
   const [[f]] = await pool.query('SELECT * FROM files WHERE id=?', [req.params.id]);
   if (!f) throw new HttpError(404, 'File not found.');
+  if (f.file_data) {
+    res.attachment(f.original_name);
+    return res.send(f.file_data);
+  }
+  // older file saved on disk (local use only)
   const full = path.join(UPLOAD_DIR, f.stored_name);
   if (!fs.existsSync(full)) throw new HttpError(404, 'The file is missing from the server.');
   res.download(full, f.original_name);
@@ -699,7 +725,8 @@ app.get('/api/documents/:id', auth(), h(async (req, res) => {
     `SELECT h.*, u.full_name user_name FROM tracking_history h
      JOIN users u ON u.id = h.user_id WHERE h.document_id=? ORDER BY h.id`, [doc.id]);
   const [files] = await pool.query(
-    `SELECT f.*, u.full_name uploaded_by_name FROM files f
+    `SELECT f.id, f.document_id, f.original_name, f.stored_name, f.file_type, f.file_size,
+            f.uploaded_by, f.uploaded_at, u.full_name uploaded_by_name FROM files f
      JOIN users u ON u.id = f.uploaded_by WHERE f.document_id=? ORDER BY f.id`, [doc.id]);
   res.json({ doc, routing, approvals, releases, files, history });
 }));
@@ -751,6 +778,9 @@ app.post('/api/documents/:id/route', auth(), h(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// acknowledgment receipt number, e.g. ACK-2026-00005
+const ackNo = (routingId, year) => `ACK-${year}-${String(routingId).padStart(5, '0')}`;
+
 // receive or return a routed document
 async function respondToRouting(req, res, action) {
   const remarks = (req.body.remarks || '').trim();
@@ -766,13 +796,46 @@ async function respondToRouting(req, res, action) {
       'UPDATE routing SET status=?, received_by=?, received_at=NOW(), remarks=? WHERE id=?',
       [action, req.user.id, remarks || null, r.id]);
     await conn.query('UPDATE documents SET status=? WHERE id=?', [action, r.document_id]);
-    await track(conn, r.document_id, action, remarks || `${action} by ${req.user.dept_name}`, req.user.id);
+    let details = remarks || `${action} by ${req.user.dept_name}`;
+    if (action === 'Received') {
+      // WP14: receiving a document issues an acknowledgment receipt
+      const [[{ y }]] = await conn.query('SELECT YEAR(received_at) y FROM routing WHERE id=?', [r.id]);
+      details = `Acknowledged receipt ${ackNo(r.id, y)} by ${req.user.dept_name}` + (remarks ? ` - ${remarks}` : '');
+    }
+    await track(conn, r.document_id, action, details, req.user.id);
   });
   res.json({ ok: true });
 }
 app.post('/api/routing/:id/receive', auth(), h((req, res) => respondToRouting(req, res, 'Received')));
 app.post('/api/routing/:id/return', auth(), h((req, res) => respondToRouting(req, res, 'Returned')));
 app.post('/api/routing/:id/reject', auth(), h((req, res) => respondToRouting(req, res, 'Rejected')));
+
+// WP14: acknowledgment receipt of a received routing
+app.get('/api/routing/:id/acknowledgment', auth(), h(async (req, res) => {
+  const [[r]] = await pool.query(
+    `SELECT r.id, r.status, r.from_dept_id, r.to_dept_id, r.purpose, r.remarks, r.routed_at, r.received_at,
+            d.doc_number, d.title, tp.name type_name,
+            f.name from_name, t.name to_name,
+            ru.full_name routed_by_name, rc.full_name received_by_name, rcd.name received_by_dept,
+            CONCAT(re.employee_no, ' - ', re.full_name) receiver_name
+     FROM routing r
+     JOIN documents d ON d.id = r.document_id
+     JOIN document_types tp ON tp.id = d.type_id
+     JOIN departments f ON f.id = r.from_dept_id
+     JOIN departments t ON t.id = r.to_dept_id
+     JOIN users ru ON ru.id = r.routed_by
+     LEFT JOIN users rc ON rc.id = r.received_by
+     LEFT JOIN departments rcd ON rcd.id = rc.department_id
+     LEFT JOIN receivers rv ON rv.id = r.receiver_id
+     LEFT JOIN employees re ON re.id = rv.employee_id
+     WHERE r.id=?`, [req.params.id]);
+  if (!r) throw new HttpError(404, 'Routing record not found.');
+  if (r.status !== 'Received') throw new HttpError(400, 'An acknowledgment receipt exists only for a received document.');
+  const allowed = ['admin', 'clerk'].includes(req.user.role) ||
+    [r.from_dept_id, r.to_dept_id].includes(req.user.department_id);
+  if (!allowed) throw new HttpError(403, 'You are not allowed to view this receipt.');
+  res.json({ ...r, ack_no: ackNo(r.id, new Date(r.received_at).getFullYear()) });
+}));
 
 // approve or reject
 app.post('/api/documents/:id/approve', auth(['admin', 'approver']), h(async (req, res) => {
@@ -835,10 +898,10 @@ app.get('/api/dashboard', auth(), h(async (req, res) => {
 }));
 
 // ---------- start ----------
-const PORT = process.env.PORT || 3000;
-
-if (process.env.NODE_ENV !== 'production') {
-  seedUsers()
+// Vercel imports this file and uses the exported app; `npm start` runs it directly.
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  ready()
     .then(() => app.listen(PORT, () => console.log(`DTS running at http://localhost:${PORT}`)))
     .catch((e) => {
       console.error('Could not start. Check your .env database settings and that schema.sql was run.\n', e.message);

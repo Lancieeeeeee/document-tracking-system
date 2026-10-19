@@ -294,7 +294,8 @@ async function openDoc(id) {
   const routingRows = routing.length
     ? routing.map((r) => `<tr><td>${esc(r.from_name)} &rarr; ${esc(r.to_name)}</td><td>${esc(r.purpose || '')}</td>
         <td>${esc(r.receiver_name || '-')}</td><td>${esc(r.due_date || '-')}</td>
-        <td>${badge(r.status)}</td><td>${r.received_by_name ? esc(r.received_by_name) + '<br><small>' + fmt(r.received_at) + '</small>' : ''}</td>
+        <td>${badge(r.status)}</td><td>${r.received_by_name ? esc(r.received_by_name) + '<br><small>' + fmt(r.received_at) + '</small>' : ''}
+          ${r.status === 'Received' ? `<br><button class="ghost" data-action="receipt" data-rid="${r.id}">Receipt</button>` : ''}</td>
         <td>${esc(r.remarks || '')}</td></tr>`).join('')
     : '<tr><td class="empty" colspan="7">Not routed yet.</td></tr>';
 
@@ -379,6 +380,7 @@ $('#modal-body').addEventListener('click', async (e) => {
   const id = $('#modal-body').dataset.id;
   const v = (n) => ($('#f-' + n) || {}).value || '';
   try {
+    if (action === 'receipt') return await showReceipt(e.target.dataset.rid);
     if (action === 'file-download') return await downloadFile(e.target.dataset.fid, e.target.dataset.name);
     if (action === 'file-replace') { replaceId = e.target.dataset.fid; $('#replace-input').click(); return; }
     if (action === 'file-delete') {
@@ -741,3 +743,29 @@ $('#inbox-rows').addEventListener('click', (e) => {
 
 // ---------- init ----------
 if (token && user) startApp();
+
+// ---------- acknowledgment receipt (WP14) ----------
+async function showReceipt(routingId) {
+  const r = await api(`/routing/${routingId}/acknowledgment`);
+  const row = (label, value) => `<tr><th>${label}</th><td>${esc(value || '-')}</td></tr>`;
+  $('#receipt-body').innerHTML = `
+    <h2>Acknowledgment Receipt</h2>
+    <p class="ack-no">${esc(r.ack_no)}</p>
+    <table class="receipt-table"><tbody>
+      ${row('Document number', r.doc_number)}
+      ${row('Title', r.title)}
+      ${row('Document type', r.type_name)}
+      ${row('From', r.from_name)}
+      ${row('Received by (department)', r.to_name)}
+      ${row('Assigned receiver', r.receiver_name)}
+      ${row('Routed by', r.routed_by_name)}
+      ${row('Date routed', fmt(r.routed_at))}
+      ${row('Received by (user)', r.received_by_name + (r.received_by_dept ? ' (' + r.received_by_dept + ')' : ''))}
+      ${row('Date and time received', fmt(r.received_at))}
+      ${row('Remarks', r.remarks)}
+    </tbody></table>
+    <p class="sign-line">Signature over printed name</p>`;
+  $('#receipt-modal').hidden = false;
+}
+$('#receipt-print').addEventListener('click', () => window.print());
+$('#receipt-close').addEventListener('click', () => { $('#receipt-modal').hidden = true; });
