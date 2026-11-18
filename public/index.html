@@ -17,6 +17,15 @@
       <label>Password <input id="password" type="password" required></label>
       <button type="submit">Log in</button>
       <p id="login-error" class="error"></p>
+      <p class="login-links"><a href="#" id="forgot-link">Forgot password?</a></p>
+    </form>
+    <form id="forgot-form" class="login-box" hidden>
+      <h1>Forgot password</h1>
+      <p class="muted">Type your username. The administrator will be told and will give you a temporary password.</p>
+      <label>Username <input id="forgot-username" required></label>
+      <button type="submit">Send reset request</button>
+      <p id="forgot-msg" class="error"></p>
+      <p class="login-links"><a href="#" id="forgot-back">Back to log in</a></p>
     </form>
   </div>
 
@@ -24,7 +33,11 @@
   <div id="app-view" hidden>
     <header>
       <h1>Document Tracking System</h1>
-      <div class="who"><span id="who"></span><button id="change-pw" class="ghost">Change password</button><button id="logout" class="ghost">Log out</button></div>
+      <div class="who"><button id="bell" class="ghost" title="Notifications">Notifications <span id="bell-count" class="count" hidden>0</span></button><span id="who"></span><button id="change-pw" class="ghost">Change password</button><button id="logout" class="ghost">Log out</button></div>
+      <div id="bell-panel" class="bell-panel" hidden>
+        <div class="bell-head"><b>Notifications</b><button id="bell-readall" class="ghost">Mark all as read</button></div>
+        <ul id="bell-list"></ul>
+      </div>
     </header>
     <nav id="nav">
       <button data-page="dashboard">Dashboard</button>
@@ -32,10 +45,14 @@
       <button data-page="inbox">Inbox</button>
       <button data-page="register" data-roles="admin,clerk">Register document</button>
       <button data-page="overdue">Overdue</button>
+      <button data-page="releases">Release History</button>
+      <button data-page="reports" data-roles="admin,clerk,approver">Reports</button>
       <button data-page="departments">Departments</button>
       <button data-page="doctypes" data-roles="admin,clerk">Document Types</button>
       <button data-page="people" data-roles="admin,clerk">Senders &amp; Receivers</button>
       <button data-page="users" data-roles="admin">Users</button>
+      <button data-page="levels" data-roles="admin">Approval Levels</button>
+      <button data-page="audit" data-roles="admin">Audit Trail</button>
     </nav>
 
     <main>
@@ -45,6 +62,14 @@
           <div class="panel"><h2>Documents by status</h2><div id="chart-status"></div></div>
           <div class="panel"><h2>Documents by origin department</h2><div id="chart-dept"></div></div>
         </div>
+        <div class="two-col" style="margin-top:1rem">
+          <div class="panel"><h2>Documents by type</h2><div id="chart-type"></div></div>
+          <div class="panel"><h2>Documents registered per month (last 6 months)</h2><div id="chart-monthly"></div></div>
+        </div>
+        <div class="two-col" style="margin-top:1rem">
+          <div class="panel"><h2>Approvals by level</h2><div id="chart-approval"></div></div>
+          <div class="panel"><h2>Routing performance (average days to respond)</h2><div id="chart-routing"></div></div>
+        </div>
       </section>
 
       <section id="page-documents" hidden>
@@ -53,7 +78,7 @@
           <select id="filter-status">
             <option value="">All statuses</option>
             <option>Registered</option><option>Routed</option><option>Received</option>
-            <option>Returned</option><option>Approved</option><option>Rejected</option><option>Released</option>
+            <option>Returned</option><option>Approved</option><option>Rejected</option><option>Released</option><option>Archived</option>
           </select>
         </div>
         <table>
@@ -81,6 +106,29 @@
           <thead><tr><th>Number</th><th>Title</th><th>Waiting at</th><th>Routed</th><th>Days waiting</th></tr></thead>
           <tbody id="overdue-rows"></tbody>
         </table>
+      </section>
+
+      <section id="page-releases" hidden>
+        <div class="toolbar"><input id="rel-search" placeholder="Search by document number, title, released to or released by"></div>
+        <table>
+          <thead><tr><th>Release no.</th><th>Document</th><th>Title</th><th>Released to</th><th>Released by</th><th>Date and time</th><th>Remarks</th><th></th></tr></thead>
+          <tbody id="rel-rows"></tbody>
+        </table>
+      </section>
+
+      <section id="page-reports" hidden>
+        <div class="report-controls">
+          <label>Report <select id="rp-type"></select></label>
+          <label>From <input type="date" id="rp-from"></label>
+          <label>To <input type="date" id="rp-to"></label>
+          <label>Department <select id="rp-dept"></select></label>
+          <label id="rp-status-label">Status <select id="rp-status"></select></label>
+          <label id="rp-doctype-label">Type <select id="rp-doctype"></select></label>
+          <button id="rp-run">Generate report</button>
+          <button id="rp-print" class="ghost" disabled>Print / Save as PDF</button>
+          <button id="rp-csv" class="ghost" disabled>Export to CSV</button>
+        </div>
+        <div id="rp-out"><p class="muted">Choose a report and click Generate report.</p></div>
       </section>
 
       <section id="page-departments" hidden>
@@ -156,6 +204,7 @@
           <label id="usr-pw-label">Password (min. 8 characters) <input id="usr-pw" type="password"></label>
           <label>Role <select id="usr-role" required></select></label>
           <label>Department <select id="usr-dept" required></select></label>
+          <label id="usr-level-label" hidden>Approval level (approvers only) <select id="usr-level"></select></label>
           <div class="btn-row">
             <button type="submit">Save</button>
             <button type="button" id="usr-cancel" class="ghost" hidden>Cancel</button>
@@ -163,8 +212,41 @@
         </form>
         <div class="toolbar"><input id="usr-search" placeholder="Search users"></div>
         <table>
-          <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Department</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Approval level</th><th>Department</th><th>Status</th><th></th></tr></thead>
           <tbody id="usr-rows"></tbody>
+        </table>
+      </section>
+
+      <section id="page-audit" hidden>
+        <h2>Audit Trail</h2>
+        <p class="muted">A permanent record of what users did in the system: who, what, which document, and when. Entries cannot be edited or deleted.</p>
+        <div class="report-controls">
+          <label>Search <input id="au-q" placeholder="User, action, document or details"></label>
+          <label>Action <select id="au-action"><option value="">All actions</option></select></label>
+          <label>From <input id="au-from" type="date"></label>
+          <label>To <input id="au-to" type="date"></label>
+          <button id="au-apply">Apply</button>
+          <button id="au-csv" class="ghost">Export CSV</button>
+        </div>
+        <p id="au-sum" class="muted"></p>
+        <div class="report-table-wrap">
+          <table>
+            <thead><tr><th>Date and time</th><th>User</th><th>Action</th><th>Document</th><th>Details</th></tr></thead>
+            <tbody id="au-rows"></tbody>
+          </table>
+        </div>
+        <div class="btn-row" style="margin-top:.8rem;align-items:center">
+          <button id="au-prev" class="ghost">Previous</button>
+          <span id="au-page" class="muted"></span>
+          <button id="au-next" class="ghost">Next</button>
+        </div>
+      </section>
+
+      <section id="page-levels" hidden>
+        <p class="muted" style="margin-top:0">A document is approved level by level, in this order. Deactivate a level to skip it. At least one level must stay active.</p>
+        <table>
+          <thead><tr><th>Level</th><th>Name</th><th>Active approvers</th><th>Status</th><th></th></tr></thead>
+          <tbody id="lvl-rows"></tbody>
         </table>
       </section>
 
@@ -228,5 +310,6 @@
   <div id="toast" hidden></div>
 
   <script src="app.js"></script>
+  <script src="reports.js"></script>
 </body>
 </html>
