@@ -13,6 +13,8 @@ Stack: HTML, CSS, JavaScript (browser) + Node.js (server) + MySQL 8.0. No XAMPP 
 6. Open http://localhost:3000 in your browser.
 
 ## Test accounts
+**Note:** These accounts are for local testing only. Do not use them on a live or online system. Change every default password before deploying.
+
 | Username  | Password     | Role                       |
 |-----------|--------------|----------------------------|
 | admin     | admin123     | Admin (Records Office)     |
